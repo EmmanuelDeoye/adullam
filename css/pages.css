@@ -1,0 +1,455 @@
+/* ============================================
+   ADULLAM — css/pages.css
+   Load AFTER base.css.
+   Shepherd AI chat, Bible reader, Bible planner.
+   ============================================ */
+
+/* ============================================
+   AI CHAT (Shepherd)
+   ============================================ */
+.chat-container {
+    position: fixed;
+    top: var(--top-bar-height);
+    bottom: var(--bottom-nav-height);
+    left: 0;
+    right: 0;
+    max-width: var(--max-content-width);
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    padding: var(--spacing-md);
+    gap: var(--spacing-md);
+    box-sizing: border-box;
+}
+
+.chat-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: var(--spacing-sm);
+    border-bottom: 1px solid rgba(0,0,0,0.06);
+    flex-shrink: 0;
+}
+
+[data-theme="dark"] .chat-header {
+    border-bottom-color: var(--dark-border);
+}
+
+.chat-header-title {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-weight: 700;
+    font-size: var(--text-base);
+    color: var(--primary-deep-olive);
+}
+
+.chat-header-actions {
+    display: flex;
+    gap: var(--spacing-xs);
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md);
+    padding: var(--spacing-sm);
+    -webkit-overflow-scrolling: touch;
+}
+
+.chat-message {
+    max-width: 85%;
+    padding: var(--spacing-md);
+    border-radius: var(--radius-lg);
+    animation: messageIn 0.3s ease-out;
+    position: relative;
+}
+
+@keyframes messageIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.chat-message.user {
+    align-self: flex-end;
+    background: var(--primary-deep-olive);
+    color: var(--bg-warm-ivory);
+    border-bottom-right-radius: var(--radius-sm);
+}
+
+.chat-message.ai {
+    align-self: flex-start;
+    background: var(--card-white);
+    color: var(--text-charcoal);
+    border-bottom-left-radius: var(--radius-sm);
+    box-shadow: var(--shadow-sm);
+}
+
+.chat-message.ai .message-bible-ref {
+    font-size: var(--text-xs);
+    color: var(--accent-muted-gold);
+    font-weight: 600;
+    margin-top: var(--spacing-sm);
+}
+
+/* Structured AI reply formatting — no raw markdown symbols, just clean typography */
+.chat-message-body p {
+    margin: 0 0 var(--spacing-sm) 0;
+    line-height: 1.6;
+}
+
+.chat-message-body p:last-child {
+    margin-bottom: 0;
+}
+
+.chat-message-body .ai-heading {
+    font-size: var(--text-base);
+    font-weight: 700;
+    margin: var(--spacing-sm) 0 var(--spacing-xs) 0;
+    color: var(--primary-deep-olive);
+}
+
+.chat-message-body .ai-list {
+    margin: 0 0 var(--spacing-sm) 0;
+    padding-left: 1.25em;
+    line-height: 1.6;
+}
+
+.chat-message-body .ai-list li {
+    margin-bottom: 4px;
+}
+
+.chat-message-body strong {
+    font-weight: 700;
+}
+
+.chat-message-body code {
+    background: rgba(0,0,0,0.06);
+    padding: 1px 5px;
+    border-radius: var(--radius-sm);
+    font-size: 0.92em;
+}
+
+/* Clickable action widgets the AI can attach to a reply */
+.ai-action-widget {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    width: 100%;
+    margin-top: var(--spacing-sm);
+    padding: var(--spacing-sm) var(--spacing-md);
+    border: 1px solid rgba(199,166,90,0.4);
+    background: rgba(199,166,90,0.1);
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    font-family: var(--font-primary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--primary-deep-olive);
+    transition: all var(--transition-fast);
+}
+
+.ai-action-widget:hover {
+    background: rgba(199,166,90,0.18);
+}
+
+.ai-action-widget:active {
+    transform: scale(0.98);
+}
+
+.ai-action-widget:disabled {
+    cursor: default;
+    opacity: 0.75;
+}
+
+.ai-action-widget .ai-action-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-full);
+    background: var(--primary-deep-olive);
+    color: var(--bg-warm-ivory);
+    font-size: 11px;
+    flex-shrink: 0;
+}
+
+.ai-action-widget .ai-action-label {
+    flex: 1;
+    text-align: left;
+}
+
+.ai-action-widget .ai-action-arrow {
+    font-size: var(--text-xs);
+    opacity: 0.7;
+}
+
+.ai-action-widget.running {
+    opacity: 0.7;
+}
+
+.ai-action-widget.done {
+    border-color: rgba(76,175,80,0.4);
+    background: rgba(76,175,80,0.12);
+    color: #2e7d32;
+}
+
+.ai-action-widget.done .ai-action-icon {
+    background: #4caf50;
+}
+
+.chat-input-container {
+    display: flex;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm);
+    background: var(--card-white);
+    border-radius: var(--radius-full);
+    box-shadow: var(--shadow-md);
+    flex-shrink: 0;
+}
+
+.chat-input {
+    flex: 1;
+    border: none;
+    outline: none;
+    padding: var(--spacing-md);
+    font-size: var(--text-base);
+    background: transparent;
+    color: var(--text-charcoal);
+    font-family: var(--font-primary);
+}
+
+.chat-send-btn {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-full);
+    background: var(--primary-deep-olive);
+    color: white;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all var(--transition-fast);
+    flex-shrink: 0;
+}
+
+.chat-send-btn:hover {
+    background: var(--primary-dark);
+    transform: scale(1.05);
+}
+
+.chat-send-btn:active {
+    transform: scale(0.9);
+}
+
+/* Conversation history sheet */
+.conversation-item {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-sm);
+    border-radius: var(--radius-md);
+    transition: background var(--transition-fast);
+}
+
+.conversation-item:hover,
+.conversation-item.active {
+    background: rgba(48,72,58,0.08);
+}
+
+.conversation-item-main {
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.conversation-item-main > div:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ============================================
+   BIBLE READER
+   ============================================ */
+.bible-reader {
+    max-width: var(--max-content-width);
+    margin: 0 auto;
+    padding: var(--spacing-md);
+}
+
+.bible-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--spacing-lg);
+    gap: var(--spacing-md);
+    flex-wrap: wrap;
+}
+
+.bible-controls {
+    display: flex;
+    gap: var(--spacing-sm);
+    flex-wrap: wrap;
+}
+
+.bible-nav-picker {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr 1fr;
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-lg);
+}
+
+.bible-nav-picker .form-select {
+    width: 100%;
+}
+
+.verse-jump {
+    display: flex;
+    gap: 4px;
+}
+
+.verse-jump input {
+    width: 100%;
+    min-width: 0;
+    padding: var(--spacing-sm);
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: var(--radius-md);
+    font-family: var(--font-primary);
+    font-size: var(--text-sm);
+    background: var(--card-white);
+    color: var(--text-charcoal);
+}
+
+[data-theme="dark"] .verse-jump input {
+    border-color: var(--dark-border);
+    background: var(--dark-card);
+    color: var(--dark-text);
+}
+
+.verse-jump .btn {
+    flex-shrink: 0;
+    padding-left: var(--spacing-sm);
+    padding-right: var(--spacing-sm);
+}
+
+.bible-verse.verse-flash {
+    background: rgba(199,166,90,0.28);
+    border-radius: var(--radius-sm);
+}
+
+@media (max-width: 480px) {
+    .bible-nav-picker {
+        grid-template-columns: 1fr 1fr;
+    }
+    .bible-nav-picker .verse-jump {
+        grid-column: 1 / -1;
+    }
+}
+
+.bible-verse {
+    margin-bottom: var(--spacing-md);
+    padding: var(--spacing-sm);
+    border-radius: var(--radius-sm);
+    transition: background var(--transition-fast);
+    cursor: pointer;
+    position: relative;
+}
+
+.bible-verse:hover {
+    background: rgba(48,72,58,0.05);
+}
+
+.bible-verse.selected {
+    background: rgba(48,72,58,0.1);
+}
+
+.verse-number {
+    font-weight: 700;
+    color: var(--accent-muted-gold);
+    margin-right: var(--spacing-sm);
+    font-size: var(--text-xs);
+    vertical-align: super;
+}
+
+.bible-text {
+    font-size: var(--text-base);
+    line-height: 1.8;
+    color: var(--text-charcoal);
+}
+
+/* ============================================
+   BIBLE PLANNER
+   ============================================ */
+.planner-container {
+    max-width: var(--max-content-width);
+    margin: 0 auto;
+    padding: var(--spacing-md);
+}
+
+.planner-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--spacing-md);
+    margin-bottom: var(--spacing-lg);
+}
+
+.stat-card {
+    background: var(--card-white);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md);
+    text-align: center;
+    box-shadow: var(--shadow-sm);
+}
+
+.stat-value {
+    font-size: var(--text-2xl);
+    font-weight: 800;
+    color: var(--primary-deep-olive);
+}
+
+.stat-label {
+    font-size: var(--text-xs);
+    color: var(--text-slate);
+    font-weight: 500;
+}
+
+.planner-day {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-md);
+    padding: var(--spacing-md);
+    background: var(--card-white);
+    border-radius: var(--radius-md);
+    margin-bottom: var(--spacing-sm);
+    box-shadow: var(--shadow-sm);
+    transition: all var(--transition-fast);
+}
+
+.planner-day.completed {
+    background: rgba(48,72,58,0.08);
+    opacity: 0.7;
+}
+
+.planner-day-checkbox {
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-full);
+    border: 2px solid var(--secondary-sage);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.planner-day-checkbox.checked {
+    background: var(--primary-deep-olive);
+    border-color: var(--primary-deep-olive);
+    color: white;
+}
+
