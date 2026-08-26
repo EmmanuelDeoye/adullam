@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#30483A">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>ADULLAM — AI Christian Co-Pilot</title>
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/pages.css">
+    <link rel="stylesheet" href="css/features.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Playfair+Display:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+</head>
+<body>
+    <!-- App Shell -->
+    <div id="app" class="app-shell">
+        <!-- Splash Screen -->
+        <div id="splash-screen" class="splash-screen">
+            <div class="splash-logo">
+                <div class="splash-icon">
+                    <svg viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M30 5L8 15v14c0 14 9.5 24 22 26 12.5-2 22-12 22-26V15L30 5z" stroke="#C7A65A" stroke-width="2" fill="#30483A"/>
+                        <path d="M20 30l7 7 13-14" stroke="#F8F6F0" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </div>
+                <h1 class="splash-title">ADULLAM</h1>
+                <p class="splash-subtitle">Your AI Christian Companion</p>
+            </div>
+            <div class="splash-loader">
+                <div class="loader-bar"></div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div id="main-content" class="main-content hidden">
+            <!-- Top Bar -->
+            <header id="top-bar" class="top-bar">
+                <div class="top-bar-left">
+                    <button id="menu-btn" class="icon-btn" aria-label="Menu">
+                        <i class="fas fa-bars"></i>
+                    </button>
+                    <span class="top-bar-title" id="top-bar-title">Adullam</span>
+                </div>
+                <div class="top-bar-right">
+                    <button id="notif-btn" class="icon-btn" aria-label="Notifications">
+                        <i class="fas fa-bell"></i>
+                        <span id="notif-badge" class="badge hidden">0</span>
+                    </button>
+                    <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
+                        <i class="fas fa-moon"></i>
+                    </button>
+                    <button id="profile-nav-btn" class="icon-btn profile-nav-btn" aria-label="Profile">
+                        <div id="profile-nav-avatar" class="profile-nav-avatar">
+                            <i class="fas fa-user"></i>
+                        </div>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Side Drawer -->
+            <div id="drawer-overlay" class="drawer-overlay hidden"></div>
+            <aside id="side-drawer" class="side-drawer">
+                <div class="drawer-header">
+                    <div class="drawer-logo">
+                        <svg viewBox="0 0 40 40" fill="none"><path d="M20 3L5 10v10c0 9 6.5 16 15 17.5C28.5 36 35 29 35 20V10L20 3z" stroke="#C7A65A" stroke-width="1.5" fill="#30483A"/><path d="M13 20l5 5 9-10" stroke="#F8F6F0" stroke-width="2" stroke-linecap="round"/></svg>
+                        <span>ADULLAM</span>
+                    </div>
+                    <button id="drawer-close" class="icon-btn"><i class="fas fa-times"></i></button>
+                </div>
+                <nav class="drawer-nav">
+                    <a href="#/home" class="drawer-link active" data-route="home"><i class="fas fa-home"></i> Home</a>
+                    <a href="#/bible" class="drawer-link" data-route="bible"><i class="fas fa-book-bible"></i> Bible</a>
+                    <a href="#/ask" class="drawer-link" data-route="ask"><i class="fas fa-dove"></i> Shepherd</a>
+                    <a href="#/reels" class="drawer-link" data-route="reels"><i class="fas fa-play"></i> Reels</a>
+                    <a href="#/community" class="drawer-link" data-route="community"><i class="fas fa-users"></i> Community</a>
+                    <a href="#/planner" class="drawer-link" data-route="planner"><i class="fas fa-calendar-check"></i> Bible Planner</a>
+                    <a href="#/messages" class="drawer-link" data-route="messages"><i class="fas fa-envelope"></i> Messages</a>
+                    <a href="#/profile" class="drawer-link" data-route="profile"><i class="fas fa-user"></i> My Profile</a>
+                    <a href="#/settings" class="drawer-link" data-route="settings"><i class="fas fa-cog"></i> Settings</a>
+                </nav>
+                <div class="drawer-footer">
+                    <button id="drawer-logout" class="btn btn-outline btn-sm"><i class="fas fa-sign-out-alt"></i> Sign Out</button>
+                </div>
+            </aside>
+
+            <!-- Page Container -->
+            <main id="page-container" class="page-container">
+                <!-- Dynamic views rendered here -->
+            </main>
+
+            <!-- Bottom Navigation -->
+            <nav id="bottom-nav" class="bottom-nav bottom-nav-3">
+                <a href="#/home" class="nav-item" data-route="home">
+                    <i class="fas fa-home"></i>
+                    <span>Home</span>
+                </a>
+                <a href="#/ask" class="nav-item nav-center" data-route="ask">
+                    <div class="nav-center-circle">
+                        <i class="fas fa-dove"></i>
+                    </div>
+                    <span>Shepherd</span>
+                </a>
+                <a href="#/reels" class="nav-item" data-route="reels">
+                    <i class="fas fa-play"></i>
+                    <span>Reels</span>
+                </a>
+            </nav>
+
+            <!-- Toast Container -->
+            <div id="toast-container" class="toast-container"></div>
+
+            <!-- Modal Container -->
+            <div id="modal-container" class="modal-container hidden"></div>
+
+            <!-- Bottom Sheet Container -->
+            <div id="sheet-container" class="sheet-container hidden"></div>
+        </div>
+    </div>
+
+    <!-- Firebase SDK -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-storage-compat.js"></script>
+
+    <!-- Main Application Script -->
+    <script src="js/config.js"></script>
+    <script src="js/core.js"></script>
+    <script src="js/features.js"></script>
+    <script src="js/community.js"></script>
+</body>
+</html>
