@@ -1128,6 +1128,19 @@ function initEventListeners() {
     window.addEventListener('popstate', (e) => {
         const state = e.state || {};
 
+        // A modal/sheet/drawer was just closed via its own UI (X button,
+        // backdrop click, etc.) and called history.back() purely to keep
+        // the URL/history stack tidy. That should never re-render the
+        // current page — it would wipe out scroll position, form input,
+        // reel playback position, and any other in-progress UI state.
+        if (AppState.suppressNextPopstateNav) {
+            AppState.suppressNextPopstateNav = false;
+            if (AppState.modalOpen) closeModal(true);
+            if (AppState.sheetOpen) closeSheet(true);
+            if (AppState.drawerOpen) closeDrawer(true);
+            return;
+        }
+
         if (AppState.modalOpen) {
             closeModal(true);
             return;
@@ -1204,6 +1217,9 @@ async function initApp() {
     
     // Initialize theme
     initTheme();
+
+    // Initialize text-to-speech voices for Shepherd's replies
+    initVoices();
     
     // Initialize event listeners
     initEventListeners();
@@ -1224,6 +1240,10 @@ document.addEventListener('DOMContentLoaded', initApp);
 window.navigateTo = navigateTo;
 window.toggleVerseSelection = toggleVerseSelection;
 window.sendChatMessage = sendChatMessage;
+window.toggleSpeakMessage = toggleSpeakMessage;
+window.showVoicePickerSheet = showVoicePickerSheet;
+window.selectVoice = selectVoice;
+window.previewVoice = previewVoice;
 window.discussReflectionWithShepherd = discussReflectionWithShepherd;
 window.askSuggestedQuestion = askSuggestedQuestion;
 window.showFontSizeOptions = showFontSizeOptions;

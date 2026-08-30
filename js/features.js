@@ -19,6 +19,9 @@ function renderAskPage() {
                     <span id="chat-conversation-title">${AppState.currentConversationId ? (AppState.aiConversations.find(c => c.id === AppState.currentConversationId)?.title || 'Shepherd') : 'Shepherd'}</span>
                 </div>
                 <div class="chat-header-actions">
+                    <button class="icon-btn" id="chat-voice-btn" aria-label="Voice settings">
+                        <i class="fas fa-volume-high"></i>
+                    </button>
                     <button class="icon-btn" id="chat-new-btn" aria-label="New conversation">
                         <i class="fas fa-plus"></i>
                     </button>
@@ -61,6 +64,7 @@ function renderAskPage() {
 
     $('#chat-new-btn').addEventListener('click', startNewConversation);
     $('#chat-history-btn').addEventListener('click', showConversationHistory);
+    $('#chat-voice-btn').addEventListener('click', showVoicePickerSheet);
 
     // Render existing chat history
     renderChatHistory();
@@ -76,7 +80,7 @@ function renderChatHistory() {
     const chatMessages = $('#chat-messages');
     if (!chatMessages || AppState.aiChatHistory.length === 0) return;
     
-    chatMessages.innerHTML = AppState.aiChatHistory.map(msg => `
+    chatMessages.innerHTML = AppState.aiChatHistory.map((msg, index) => `
         <div class="chat-message ${msg.role === 'user' ? 'user' : 'ai'}">
             <div class="chat-message-body">${msg.role === 'user' ? escapeHtml(msg.content) : formatAIText(msg.content)}</div>
             ${msg.bibleRefs ? `
@@ -85,6 +89,11 @@ function renderChatHistory() {
                 </div>
             ` : ''}
             ${msg.action ? renderActionWidget(msg.action, msg.actionId) : ''}
+            ${msg.role === 'assistant' ? `
+                <button class="chat-listen-btn" id="listen-btn-${index}" onclick="toggleSpeakMessage(${index})" aria-label="Listen">
+                    <i class="fas fa-volume-high"></i> <span>Listen</span>
+                </button>
+            ` : ''}
         </div>
     `).join('');
 }
@@ -312,6 +321,191 @@ function formatAIText(raw) {
     return html;
 }
 
+function stripMarkdownForSpeech(raw) {
+    if (!raw) return '';
+    return raw
+        .replace(/§ACTION§[\s\S]*$/, '')
+        .replace(/\s*[—–]\s*/g, ', ')
+        .replace(/^#{1,4}\s+/gm, '')
+        .replace(/\*\*(.+?)\*\*/g, '$1')
+        .replace(/(^|[^*])\*(?!\*)(.+?)\*(?!\*)/g, '$1$2')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/^[-*•]\s+/gm, '')
+        .replace(/^\d+[.)]\s+/gm, '')
+        .replace(/\n{2,}/g, '. ')
+        .replace(/\n/g, ' ')
+        .trim();
+}
+
+/* ============================================
+   VOICE (Text-to-Speech for Shepherd's replies)
+   ============================================ */
+let availableVoices = [];
+let currentUtterance = null;
+let currentSpeakingIndex = null;
+
+// Name fragments that reliably indicate a more natural-sounding voice
+// across Chrome, Edge, and Safari/iOS, so the 3-4 options we surface
+// aren't the flat default robotic system voice.
+const PREFERRED_VOICE_HINTS = [
+    'natural', 'neural', 'enhanced', 'premium', 'google us english',
+    'google uk english female', 'google uk english male',
+    'samantha', 'ava', 'siri', 'aria', 'jenny'
+];
+
+function loadAvailableVoices() {
+    const all = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+    const english = all.filter(v => v.lang && v.lang.toLowerCase().startsWith('en'));
+    const pool = english.length ? english : all;
+
+    const scored = pool.map(v => {
+        const nameLower = v.name.toLowerCase();
+        const score = PREFERRED_VOICE_HINTS.some(hint => nameLower.includes(hint)) ? 1 : 0;
+        return { voice: v, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+
+    // Dedupe by name and cap at 4 choices
+    const seen = new Set();
+    availableVoices = [];
+    for (const { voice } of scored) {
+        if (seen.has(voice.name)) continue;
+        seen.add(voice.name);
+        availableVoices.push(voice);
+        if (availableVoices.length >= 4) break;
+    }
+
+    // Default to a saved preference if it's still available, otherwise
+    // the first (best-ranked) voice.
+    const savedURI = localStorage.getItem('adullam_voice_uri');
+    if (savedURI && availableVoices.some(v => v.voiceURI === savedURI)) {
+        AppState.selectedVoiceURI = savedURI;
+    } else if (availableVoices.length > 0 && !AppState.selectedVoiceURI) {
+        AppState.selectedVoiceURI = availableVoices[0].voiceURI;
+    }
+}
+
+function initVoices() {
+    if (!window.speechSynthesis) return;
+    loadAvailableVoices();
+    // Voice lists load asynchronously in some browsers (notably Chrome).
+    window.speechSynthesis.onvoiceschanged = loadAvailableVoices;
+}
+
+function getSelectedVoice() {
+    return availableVoices.find(v => v.voiceURI === AppState.selectedVoiceURI) || availableVoices[0] || null;
+}
+
+function stopSpeaking() {
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (currentSpeakingIndex !== null) {
+        const btn = document.getElementById(`listen-btn-${currentSpeakingIndex}`);
+        if (btn) btn.classList.remove('speaking');
+    }
+    currentUtterance = null;
+    currentSpeakingIndex = null;
+}
+
+function toggleSpeakMessage(index) {
+    if (!window.speechSynthesis) {
+        showToast('Voice playback is not supported on this device', 'warning');
+        return;
+    }
+
+    // Tapping the message that's already playing stops it.
+    if (currentSpeakingIndex === index) {
+        stopSpeaking();
+        return;
+    }
+
+    stopSpeaking();
+
+    const msg = AppState.aiChatHistory[index];
+    if (!msg) return;
+
+    const text = stripMarkdownForSpeech(msg.content);
+    if (!text) return;
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    const voice = getSelectedVoice();
+    if (voice) utterance.voice = voice;
+    utterance.rate = 0.98;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+
+    const btn = document.getElementById(`listen-btn-${index}`);
+
+    utterance.onstart = () => {
+        currentSpeakingIndex = index;
+        if (btn) btn.classList.add('speaking');
+    };
+    utterance.onend = utterance.onerror = () => {
+        if (btn) btn.classList.remove('speaking');
+        if (currentSpeakingIndex === index) currentSpeakingIndex = null;
+        currentUtterance = null;
+    };
+
+    currentUtterance = utterance;
+    window.speechSynthesis.speak(utterance);
+}
+
+function showVoicePickerSheet() {
+    if (!window.speechSynthesis) {
+        showToast('Voice playback is not supported on this device', 'warning');
+        return;
+    }
+
+    if (availableVoices.length === 0) loadAvailableVoices();
+
+    const renderVoiceList = () => {
+        if (availableVoices.length === 0) {
+            return `<p class="text-center text-muted" style="padding: 20px 0;">No voices found on this device yet — try again in a moment.</p>`;
+        }
+        return availableVoices.map(v => `
+            <div class="voice-option ${v.voiceURI === AppState.selectedVoiceURI ? 'active' : ''}" data-voice-uri="${escapeHtml(v.voiceURI)}">
+                <div class="voice-option-info" onclick="selectVoice('${v.voiceURI.replace(/'/g, "\\'")}')">
+                    <div class="voice-option-name">${escapeHtml(v.name.replace(/^Google\s|^Microsoft\s/, ''))}</div>
+                    <div class="voice-option-lang">${escapeHtml(v.lang)}</div>
+                </div>
+                <button class="icon-btn" onclick="previewVoice('${v.voiceURI.replace(/'/g, "\\'")}')" aria-label="Preview voice">
+                    <i class="fas fa-play"></i>
+                </button>
+                <i class="fas fa-check voice-selected-check"></i>
+            </div>
+        `).join('');
+    };
+
+    showSheet(`
+        <h3 style="margin-bottom: 4px;">Shepherd's Voice</h3>
+        <p class="text-muted" style="font-size: 13px; margin-bottom: 16px;">Choose how AI replies sound when read aloud.</p>
+        <div id="voice-options-list">${renderVoiceList()}</div>
+    `);
+}
+
+function selectVoice(voiceURI) {
+    AppState.selectedVoiceURI = voiceURI;
+    localStorage.setItem('adullam_voice_uri', voiceURI);
+
+    $$('.voice-option').forEach(el => {
+        el.classList.toggle('active', el.dataset.voiceUri === voiceURI);
+    });
+
+    showToast('Voice updated', 'success');
+}
+
+function previewVoice(voiceURI) {
+    if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+
+    const voice = availableVoices.find(v => v.voiceURI === voiceURI);
+    const utterance = new SpeechSynthesisUtterance("Peace be with you. This is how I'll sound.");
+    if (voice) utterance.voice = voice;
+    utterance.rate = 0.98;
+    utterance.pitch = 1;
+    window.speechSynthesis.speak(utterance);
+}
+
 /* ---- AI-triggered action widgets ---- */
 function extractAIAction(text) {
     const match = text.match(/§ACTION§(\{[\s\S]*\})\s*$/);
@@ -526,6 +720,7 @@ async function refineConversationTitle(convId, messages) {
 }
 
 function startNewConversation() {
+    stopSpeaking();
     AppState.aiChatHistory = [];
     AppState.currentConversationId = null;
     renderAskPage();
@@ -535,6 +730,7 @@ function loadConversation(convId) {
     const conv = AppState.aiConversations.find(c => c.id === convId);
     if (!conv) return;
 
+    stopSpeaking();
     AppState.aiChatHistory = conv.messages || [];
     AppState.currentConversationId = conv.id;
     closeSheet();
@@ -768,7 +964,7 @@ function createNewPlan() {
         </div>
         
         <button id="generate-plan-btn" class="btn btn-primary btn-block mt-3">
-            <i class="fas fa-robot"></i> Generate Plan
+            <i class="fas fa-dove"></i> Generate Plan
         </button>
     `;
     
@@ -782,11 +978,16 @@ function createNewPlan() {
         const planType = $('#plan-type').value;
         const duration = parseInt($('#plan-duration').value);
         const customDescription = $('#custom-plan-description')?.value;
-        
-        setLoading(true);
-        
+
+        const btn = $('#generate-plan-btn');
+        btn.disabled = true;
+        btn.classList.add('btn-loading');
+        btn.innerHTML = `<span class="btn-spinner"></span> Generating…`;
+
         try {
-            const plan = await generatePlanWithAI(planType, duration, customDescription);
+            const plan = await generatePlanWithAI(planType, duration, customDescription, (done, total) => {
+                if (btn) btn.innerHTML = `<span class="btn-spinner"></span> Generating ${done}/${total} days…`;
+            });
             
             AppState.currentPlan = plan;
             AppState.plannerData.push(plan);
@@ -802,41 +1003,99 @@ function createNewPlan() {
         } catch (error) {
             showToast('Failed to generate plan', 'error');
             console.error(error);
-        } finally {
-            setLoading(false);
+            btn.disabled = false;
+            btn.classList.remove('btn-loading');
+            btn.innerHTML = `<i class="fas fa-dove"></i> Generate Plan`;
         }
     });
 }
 
-async function generatePlanWithAI(planType, duration, customDescription) {
-    // Use DeepSeek AI to generate plan
-    const prompt = `Create a ${duration}-day Bible reading plan for a ${planType.replace('_', ' ')}. 
-    ${customDescription ? `Focus: ${customDescription}` : ''}
-    Format: JSON array with fields: date, passage, topic, reflection_question, prayer_point`;
-    
-    // For demo, generate mock plan (in production, call DeepSeek API)
+async function generatePlanWithAI(planType, duration, customDescription, onProgress) {
+    const planLabel = planType.replace(/_/g, ' ');
     const days = [];
     const startDate = new Date();
-    const topics = ['Faith', 'Hope', 'Love', 'Prayer', 'Forgiveness', 'Purpose', 'Wisdom', 'Peace', 'Joy', 'Patience'];
-    const passages = ['Matthew 5', 'Psalm 23', 'Romans 8', 'Proverbs 3', 'John 3', 'Philippians 4', 'Isaiah 40', 'Jeremiah 29', 'James 1', '1 Corinthians 13'];
-    
-    for (let i = 0; i < duration; i++) {
-        const date = new Date(startDate);
-        date.setDate(date.getDate() + i);
-        
-        days.push({
-            date: date.toISOString().split('T')[0],
-            passage: passages[i % passages.length],
-            topic: topics[i % topics.length],
-            reflection_question: `What does this passage teach you about ${topics[i % topics.length]}?`,
-            prayer_point: `Pray for deeper understanding of ${topics[i % topics.length]}`,
-            completed: false
-        });
+    const batchSize = 30;
+
+    const fallbackTopics = ['Faith', 'Hope', 'Love', 'Prayer', 'Forgiveness', 'Purpose', 'Wisdom', 'Peace', 'Joy', 'Patience'];
+    const fallbackPassages = ['Matthew 5', 'Psalm 23', 'Romans 8', 'Proverbs 3', 'John 3', 'Philippians 4', 'Isaiah 40', 'Jeremiah 29', 'James 1', '1 Corinthians 13'];
+
+    while (days.length < duration) {
+        const remaining = duration - days.length;
+        const count = Math.min(batchSize, remaining);
+        const usedTopics = days.slice(-10).map(d => d.topic).filter(Boolean);
+
+        const prompt = `Create ${count} consecutive days of a Bible reading plan for someone focused on: ${planLabel}.${customDescription ? ` Specific focus: ${customDescription}.` : ''}
+This is day ${days.length + 1} through ${days.length + count} of a ${duration}-day plan.
+${usedTopics.length ? `Avoid repeating these recent topics: ${usedTopics.join(', ')}.` : ''}
+Respond with ONLY a JSON array (no markdown, no code fences, no commentary) of exactly ${count} objects, each with these exact fields:
+- "passage": a specific Bible reference (e.g. "Romans 8:28-39")
+- "topic": a short 1-3 word theme
+- "reflection_question": one thoughtful open-ended question about the passage
+- "prayer_point": one short prayer focus related to the passage`;
+
+        try {
+            const response = await fetch(DEEPSEEK_API_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${DEEPSEEK_API_KEY}`
+                },
+                body: JSON.stringify({
+                    model: 'deepseek-chat',
+                    messages: [
+                        { role: 'system', content: 'You generate structured Bible reading plans. You always respond with strictly valid JSON only — no markdown formatting, no code fences, no extra text before or after the JSON array.' },
+                        { role: 'user', content: prompt }
+                    ],
+                    temperature: 0.8,
+                    max_tokens: Math.min(4000, count * 150)
+                })
+            });
+
+            if (!response.ok) throw new Error('AI plan request failed');
+
+            const data = await response.json();
+            let raw = data.choices[0].message.content.trim();
+            raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+
+            const arrayMatch = raw.match(/\[[\s\S]*\]/);
+            const parsed = JSON.parse(arrayMatch ? arrayMatch[0] : raw);
+
+            parsed.slice(0, count).forEach(entry => {
+                const date = new Date(startDate);
+                date.setDate(date.getDate() + days.length);
+                const topic = entry.topic || planLabel;
+                days.push({
+                    date: date.toISOString().split('T')[0],
+                    passage: entry.passage || 'Psalm 23',
+                    topic,
+                    reflection_question: entry.reflection_question || `What does this passage teach you about ${topic}?`,
+                    prayer_point: entry.prayer_point || `Pray for deeper understanding of ${topic}`,
+                    completed: false
+                });
+            });
+        } catch (error) {
+            console.error('AI plan generation error — filling this batch with a fallback so the plan still completes:', error);
+            for (let i = 0; i < count; i++) {
+                const date = new Date(startDate);
+                date.setDate(date.getDate() + days.length);
+                const topic = fallbackTopics[days.length % fallbackTopics.length];
+                days.push({
+                    date: date.toISOString().split('T')[0],
+                    passage: fallbackPassages[days.length % fallbackPassages.length],
+                    topic,
+                    reflection_question: `What does this passage teach you about ${topic}?`,
+                    prayer_point: `Pray for deeper understanding of ${topic}`,
+                    completed: false
+                });
+            }
+        }
+
+        if (onProgress) onProgress(days.length, duration);
     }
-    
+
     return {
         id: generateId(),
-        name: `${planType.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase())} Plan`,
+        name: `${planLabel.replace(/\b\w/g, l => l.toUpperCase())} Plan`,
         type: planType,
         duration,
         createdAt: Date.now(),
@@ -923,6 +1182,7 @@ async function loadReels() {
         }
 
         container.innerHTML = AppState.reels.map(reel => renderReelSlide(reel)).join('');
+        initReelVideoObservers();
     } catch (error) {
         console.error('Error loading reels:', error);
         container.innerHTML = `<div class="reel-slide reel-empty-slide"><p style="color:white;">Failed to load reels.</p></div>`;
@@ -1094,6 +1354,15 @@ function showCreateReelModal(prefill) {
     });
 }
 
+function updateReelCardDOM(reelId) {
+    const reel = AppState.reels.find(r => r.id === reelId);
+    const el = document.getElementById(`reel-${reelId}`);
+    if (reel && el) {
+        el.outerHTML = renderReelSlide(reel);
+        initReelVideoObservers();
+    }
+}
+
 function deleteReel(reelId) {
     showModal(`
         <h3 style="margin-bottom: 16px;">Delete Reel</h3>
@@ -1110,7 +1379,10 @@ async function confirmDeleteReel(reelId) {
         await database.ref(`reels/${reelId}`).remove();
         closeModal();
         showToast('Reel deleted', 'success');
-        loadReels();
+        // Remove just this slide — reloading the whole feed would reset
+        // everyone's scroll position back to the top reel.
+        AppState.reels = AppState.reels.filter(r => r.id !== reelId);
+        document.getElementById(`reel-${reelId}`)?.remove();
     } catch (error) {
         showToast('Failed to delete reel', 'error');
     }
@@ -1121,16 +1393,23 @@ async function loveReel(reelId) {
 
     const uid = AppState.currentUser.uid;
     const loveRef = database.ref(`reels/${reelId}/likes/${uid}`);
+    const reel = AppState.reels.find(r => r.id === reelId);
 
     try {
         const snapshot = await loveRef.once('value');
         if (snapshot.exists()) {
             await loveRef.remove();
+            if (reel?.likes) delete reel.likes[uid];
         } else {
             await loveRef.set(true);
+            if (reel) {
+                reel.likes = reel.likes || {};
+                reel.likes[uid] = true;
+            }
             showToast('You dropped a heart on their reel', 'success');
         }
-        loadReels();
+        // Update just this card in place — don't reload the whole feed.
+        updateReelCardDOM(reelId);
     } catch (error) {
         showToast('Failed to update', 'error');
     }
@@ -1209,7 +1488,7 @@ async function submitReelComment(reelId) {
         }
 
         showReelComments(reelId);
-        loadReels();
+        updateReelCardDOM(reelId);
     } catch (error) {
         showToast('Failed to post comment', 'error');
         console.error(error);
@@ -1217,20 +1496,112 @@ async function submitReelComment(reelId) {
 }
 
 function renderEmbed(url) {
-    // YouTube embed
+    // YouTube — render a lightweight thumbnail placeholder. The actual
+    // iframe is only created once this slide scrolls into view (see
+    // initReelVideoObservers), so it autoplays as the user scrolls to it
+    // and stops (freeing resources) once they scroll past.
     if (url && (url.includes('youtube.com') || url.includes('youtu.be'))) {
         const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
         if (videoId) {
-            return `<iframe width="100%" height="100%" src="https://www.youtube.com/embed/${videoId}?autoplay=0&playsinline=1" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" style="border-radius: 0;"></iframe>`;
+            return `
+                <div class="reel-yt-wrap" data-yt-id="${videoId}">
+                    <img class="reel-yt-thumb" src="https://img.youtube.com/vi/${videoId}/hqdefault.jpg" alt="" loading="lazy">
+                    <div class="reel-yt-play"><i class="fas fa-play"></i></div>
+                </div>
+            `;
         }
     }
 
-    // Twitter/X embed
+    // Twitter/X — render an actual embedded tweet (including native video
+    // playback) via Twitter's widgets.js, instead of just linking out.
     if (url && (url.includes('twitter.com') || url.includes('x.com'))) {
-        return `<div class="reel-link-card"><i class="fab fa-x-twitter" style="font-size: 32px;"></i><a href="${url}" target="_blank">View on X</a></div>`;
+        return `
+            <div class="reel-tweet-wrap">
+                <blockquote class="twitter-tweet" data-theme="dark" data-dnt="true">
+                    <a href="${url}"></a>
+                </blockquote>
+            </div>
+        `;
     }
 
     return `<div class="reel-link-card"><i class="fas fa-link" style="font-size: 32px;"></i><a href="${url}" target="_blank">View Link</a></div>`;
+}
+
+/* ---- Scroll-triggered playback: YouTube autoplay + Twitter widget hydration ---- */
+let twitterWidgetsLoadingPromise = null;
+
+function ensureTwitterWidgetsLoaded() {
+    if (window.twttr && window.twttr.widgets) return Promise.resolve(window.twttr);
+    if (twitterWidgetsLoadingPromise) return twitterWidgetsLoadingPromise;
+
+    twitterWidgetsLoadingPromise = new Promise((resolve) => {
+        const existing = document.getElementById('twitter-widgets-js');
+        if (existing) {
+            existing.addEventListener('load', () => resolve(window.twttr));
+            return;
+        }
+        const script = document.createElement('script');
+        script.id = 'twitter-widgets-js';
+        script.src = 'https://platform.twitter.com/widgets.js';
+        script.async = true;
+        script.charset = 'utf-8';
+        script.onload = () => resolve(window.twttr);
+        document.head.appendChild(script);
+    });
+
+    return twitterWidgetsLoadingPromise;
+}
+
+let reelVideoObserver = null;
+
+function initReelVideoObservers() {
+    // Hydrate any tweet placeholders into real, playable embeds.
+    ensureTwitterWidgetsLoaded().then((twttr) => {
+        if (twttr?.widgets) twttr.widgets.load();
+    });
+
+    const container = document.getElementById('reels-container');
+    if (!container) return;
+
+    if (reelVideoObserver) reelVideoObserver.disconnect();
+
+    reelVideoObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            const ytWrap = entry.target.querySelector('.reel-yt-wrap');
+            if (!ytWrap) return;
+
+            if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
+                activateYouTubeSlide(ytWrap);
+            } else {
+                deactivateYouTubeSlide(ytWrap);
+            }
+        });
+    }, { root: container, threshold: [0, 0.6, 1] });
+
+    container.querySelectorAll('.reel-slide').forEach(slide => reelVideoObserver.observe(slide));
+}
+
+function activateYouTubeSlide(ytWrap) {
+    if (ytWrap.querySelector('iframe')) return;
+
+    const videoId = ytWrap.dataset.ytId;
+    if (!videoId) return;
+
+    const iframe = document.createElement('iframe');
+    iframe.src = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&playsinline=1&loop=1&playlist=${videoId}&controls=1&rel=0`;
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
+    iframe.setAttribute('frameborder', '0');
+    iframe.setAttribute('allowfullscreen', '');
+    iframe.className = 'reel-yt-iframe';
+
+    ytWrap.appendChild(iframe);
+    ytWrap.classList.add('playing');
+}
+
+function deactivateYouTubeSlide(ytWrap) {
+    const iframe = ytWrap.querySelector('iframe');
+    if (iframe) iframe.remove();
+    ytWrap.classList.remove('playing');
 }
 
 async function moderateContent(content) {

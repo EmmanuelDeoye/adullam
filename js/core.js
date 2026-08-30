@@ -38,10 +38,12 @@ const AppState = {
     modalOpen: false,
     sheetOpen: false,
     drawerOpen: false,
+    suppressNextPopstateNav: false,
     aiConversations: [],
     currentConversationId: null,
     viewedProfileId: null,
     todayReflection: '',
+    selectedVoiceURI: null,
     reels: [],
     communityGroups: [],
     currentGroupId: null,
@@ -180,6 +182,9 @@ function closeModal(fromPopstate = false) {
     AppState.modalOpen = false;
 
     if (wasOpen && !fromPopstate && history.state && history.state.overlay === 'modal') {
+        // This history.back() only exists to unwind the entry we pushed
+        // when the modal opened — it must NOT trigger a route re-render.
+        AppState.suppressNextPopstateNav = true;
         history.back();
     }
 }
@@ -222,6 +227,7 @@ function closeSheet(fromPopstate = false) {
     AppState.sheetOpen = false;
 
     if (wasOpen && !fromPopstate && history.state && history.state.overlay === 'sheet') {
+        AppState.suppressNextPopstateNav = true;
         history.back();
     }
 }
@@ -551,6 +557,9 @@ function handleLogout() {
 function navigateTo(route, options = {}) {
     const { fromPopstate = false, replace = false } = options;
 
+    // Stop any Shepherd voice playback before leaving/changing pages
+    if (typeof stopSpeaking === 'function') stopSpeaking();
+
     // Close any open overlays first (they manage their own history entries)
     if (AppState.modalOpen) closeModal(true);
     if (AppState.sheetOpen) closeSheet(true);
@@ -664,6 +673,7 @@ function closeDrawer(fromPopstate = false) {
     AppState.drawerOpen = false;
 
     if (wasOpen && !fromPopstate && history.state && history.state.overlay === 'drawer') {
+        AppState.suppressNextPopstateNav = true;
         history.back();
     }
 }
@@ -710,7 +720,12 @@ async function renderHomePage() {
                 <button class="btn btn-gold btn-sm" onclick="navigateTo('planner')">
                     <i class="fas fa-calendar-check"></i> Plan Study
                 </button>
-                
+                <button class="btn btn-outline btn-sm" onclick="navigateTo('reels')">
+                    <i class="fas fa-play"></i> Reels
+                </button>
+                <button class="btn btn-outline btn-sm" onclick="navigateTo('community')">
+                    <i class="fas fa-users"></i> Community
+                </button>
             </div>
 
             <!-- Meet Shepherd -->
