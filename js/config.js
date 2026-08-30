@@ -5,7 +5,6 @@
    ============================================ */
 
 // Firebase Configuration
-// ⚠️ REPLACE WITH YOUR FIREBASE CONFIG
 // Import the functions you need from the SDKs you need
 
 // TODO: Add SDKs for Firebase products that you want to use
@@ -14,15 +13,14 @@
 // Your web app's Firebase configuration
 // For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
-  apiKey: "AIzaSyA8dl9fpCZjkydBwlQMRDl8s_Ck7HrCsls",
-  authDomain: "adullam-90a36.firebaseapp.com",
-  databaseURL: "https://adullam-90a36-default-rtdb.firebaseio.com",
-  projectId: "adullam-90a36",
-  storageBucket: "adullam-90a36.firebasestorage.app",
-  messagingSenderId: "220211700381",
-  appId: "1:220211700381:web:4dfa996f180a3c8bacaa74",
-  measurementId: "G-ETN0241C15"
-};
+  apiKey: "AIzaSyAYyIEAlJD8FgeE2bv73fWwKbpsDPuiB84",
+  authDomain: "graceguide-8d9f5.firebaseapp.com",
+   databaseURL: "https://graceguide-8d9f5-default-rtdb.firebase.io",
+  projectId: "graceguide-8d9f5",
+  storageBucket: "graceguide-8d9f5.firebasestorage.app",
+  messagingSenderId: "859988308746",
+  appId: "1:859988308746:web:f68879be9f0d967b9040f3",
+  measurementId: "G-2QKQHE2TBW"
 
 // Initialize Firebase
 
