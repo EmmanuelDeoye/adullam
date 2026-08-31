@@ -12,16 +12,17 @@
 
 // Your web app's Firebase configuration
 // For Firebase JS SDK v7.20.0 and later, measurementId is optional
+// For Firebase JS SDK v7.20.0 and later, measurementId is optional
 const firebaseConfig = {
   apiKey: "AIzaSyAYyIEAlJD8FgeE2bv73fWwKbpsDPuiB84",
   authDomain: "graceguide-8d9f5.firebaseapp.com",
-   databaseURL: "https://graceguide-8d9f5-default-rtdb.firebase.io",
+  databaseURL: "https://graceguide-8d9f5-default-rtdb.europe-west1.firebasedatabase.app",
   projectId: "graceguide-8d9f5",
   storageBucket: "graceguide-8d9f5.firebasestorage.app",
   messagingSenderId: "859988308746",
   appId: "1:859988308746:web:f68879be9f0d967b9040f3",
   measurementId: "G-2QKQHE2TBW"
-}
+};
 // Initialize Firebase
 
 
