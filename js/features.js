@@ -36,7 +36,8 @@ function renderAskPage() {
                     <div class="text-center text-muted" style="padding: 40px 20px;">
                         <i class="fas fa-dove" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
                         <h3 style="margin-bottom: 8px;">Ask Shepherd</h3>
-                        <p>Ask me anything about faith, the Bible, or life. I'm here to help.</p>
+                        <p>What are you struggling with? 
+What questions do you have about the Bible and your Faith? let's talk about it.</p>
                         
                         <div style="display: grid; gap: 8px; margin-top: 24px;">
                             <button class="btn btn-outline btn-sm" onclick="askSuggestedQuestion('What does the Bible say about anxiety?')">
