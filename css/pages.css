@@ -1,5 +1,5 @@
 /* ============================================
-   ADULLAM — css/pages.css
+   GraceGuide — css/pages.css
    Load AFTER base.css.
    Shepherd AI chat, Bible reader, Bible planner.
    ============================================ */
@@ -235,6 +235,47 @@
 @keyframes listenPulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }
+}
+
+/* Bible references linkified inside Shepherd's replies */
+.bible-ref-link {
+    color: var(--primary-deep-olive);
+    font-weight: 600;
+    text-decoration: underline;
+    text-decoration-color: rgba(48,72,58,0.35);
+    text-underline-offset: 2px;
+    cursor: pointer;
+}
+
+.chat-message.ai .bible-ref-link {
+    color: var(--primary-deep-olive);
+}
+
+.chat-message.user .bible-ref-link {
+    color: inherit;
+    text-decoration-color: rgba(255,255,255,0.5);
+}
+
+/* Copy / share / post-to-reels row under each AI reply */
+.chat-message-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: var(--spacing-sm);
+    padding-top: var(--spacing-sm);
+    border-top: 1px solid rgba(0,0,0,0.06);
+}
+
+.chat-message-toolbar .icon-btn {
+    width: 32px;
+    height: 32px;
+    font-size: 13px;
+    color: var(--text-slate);
+}
+
+.chat-message-toolbar .icon-btn:hover {
+    color: var(--primary-deep-olive);
+    background: rgba(48,72,58,0.08);
 }
 
 /* Voice picker sheet */
