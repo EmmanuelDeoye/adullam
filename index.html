@@ -49,9 +49,6 @@
                         <i class="fas fa-bell"></i>
                         <span id="notif-badge" class="badge hidden">0</span>
                     </button>
-                    <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">
-                        <i class="fas fa-moon"></i>
-                    </button>
                     <button id="profile-nav-btn" class="icon-btn profile-nav-btn" aria-label="Profile">
                         <div id="profile-nav-avatar" class="profile-nav-avatar">
                             <i class="fas fa-user"></i>
@@ -66,23 +63,24 @@
                 <div class="drawer-header">
                     <div class="drawer-logo">
                         <svg viewBox="0 0 40 40" fill="none"><path d="M20 3L5 10v10c0 9 6.5 16 15 17.5C28.5 36 35 29 35 20V10L20 3z" stroke="#C7A65A" stroke-width="1.5" fill="#30483A"/><path d="M13 20l5 5 9-10" stroke="#F8F6F0" stroke-width="2" stroke-linecap="round"/></svg>
-                        <span>ADULLAM</span>
+                        <span>GraceGuide</span>
                     </div>
                     <button id="drawer-close" class="icon-btn"><i class="fas fa-times"></i></button>
                 </div>
                 <nav class="drawer-nav">
-                    <a href="#/home" class="drawer-link active" data-route="home"><i class="fas fa-home"></i> Home</a>
+                    <a href="#/home" class="drawer-link" data-route="home"><i class="fas fa-home"></i> Home</a>
                     <a href="#/bible" class="drawer-link" data-route="bible"><i class="fas fa-book-bible"></i> Bible</a>
-                    <a href="#/ask" class="drawer-link" data-route="ask"><i class="fas fa-dove"></i> Shepherd</a>
+                    <a href="#/ask" class="drawer-link active" data-route="ask"><i class="fas fa-dove"></i> Shepherd</a>
                     <a href="#/reels" class="drawer-link" data-route="reels"><i class="fas fa-play"></i> Reels</a>
                     <a href="#/community" class="drawer-link" data-route="community"><i class="fas fa-users"></i> Forum</a>
                     <a href="#/planner" class="drawer-link" data-route="planner"><i class="fas fa-calendar-check"></i> Study Planner</a>
-                    <a href="#/messages" class="drawer-link" data-route="messages"><i class="fas fa-envelope"></i> Messages</a>
+                    <a href="#/messages" class="drawer-link" data-route="messages"><i class="fas fa-comment-dots"></i> Chats</a>
                     <a href="#/profile" class="drawer-link" data-route="profile"><i class="fas fa-user"></i> My Profile</a>
+                    <a href="#/talk-to-someone" class="drawer-link drawer-link-support" data-route="talk-to-someone"><i class="fas fa-hand-holding-heart"></i> Talk to Someone</a>
                     <a href="#/settings" class="drawer-link" data-route="settings"><i class="fas fa-cog"></i> Settings</a>
                 </nav>
                 <div class="drawer-footer">
-                    <button id="drawer-logout" class="btn btn-outline btn-sm"><i class="fas fa-sign-out-alt"></i> Sign Out</button>
+                    <button id="drawer-logout" class="btn btn-outline btn-sm hidden"><i class="fas fa-right-to-bracket"></i> Sign In</button>
                 </div>
             </aside>
 
