@@ -1,8 +1,8 @@
 /* ============================================
-   ADULLAM — js/community.js
+   GraceGuide — js/community.js
    Load AFTER config.js, core.js, and features.js.
-   Contains: Reels, Community Groups, public profile
-   view/follow/friend/report/block, Direct Messages,
+   Contains: Reels, Forum Groups, public profile
+   view/connect/report/block, Direct Messages,
    Profile page, Settings, notifications, event
    listeners, and app initialization/bootstrap.
    ============================================ */
@@ -14,7 +14,7 @@ async function renderCommunityPage() {
     DOM.pageContainer.innerHTML = `
         <div class="community-container">
             <div class="flex items-center justify-between mb-4">
-                <h2 style="font-weight: 700;">Community Groups</h2>
+                <h2 style="font-weight: 700;">Forum</h2>
                 <button class="btn btn-primary btn-sm" onclick="showCreateGroupModal()">
                     <i class="fas fa-plus"></i> New Group
                 </button>
@@ -43,7 +43,7 @@ async function loadCommunityGroups() {
             container.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon"><i class="fas fa-users"></i></div>
-                    <h3 style="margin-bottom: 8px;">No Groups Yet</h3>
+                    <h3 style="margin-bottom: 8px;">No Forum Groups Yet</h3>
                     <p style="color: var(--text-slate);">Start a group to discuss faith, study, and life together.</p>
                 </div>
             `;
@@ -140,7 +140,7 @@ async function renderGroupChatPage() {
         <div class="group-chat-container">
             <div class="group-chat-header">
                 <button class="icon-btn" onclick="navigateTo('community')"><i class="fas fa-arrow-left"></i></button>
-                <div style="flex:1; min-width:0;">
+                <div style="flex:1; min-width:0; cursor:pointer;" onclick="showGroupMembers('${groupId}')">
                     <div id="group-chat-title" style="font-weight:700;">Loading…</div>
                     <div id="group-chat-members" style="font-size:12px; color: var(--text-slate);"></div>
                 </div>
@@ -204,6 +204,55 @@ async function joinGroup(groupId) {
     }
 }
 
+/**
+ * WhatsApp-style member list: tap the group name/member count to see
+ * everyone in the group, then tap a member to view their profile.
+ */
+async function showGroupMembers(groupId) {
+    showSheet(`
+        <h3 style="margin-bottom: 16px;">Group Members</h3>
+        <div class="skeleton" style="height: 48px; margin-bottom: 8px;"></div>
+        <div class="skeleton" style="height: 48px; margin-bottom: 8px;"></div>
+    `);
+
+    try {
+        const groupSnap = await database.ref(`communityGroups/${groupId}`).once('value');
+        const group = groupSnap.val();
+        const memberIds = group?.members ? Object.keys(group.members) : [];
+
+        if (memberIds.length === 0) {
+            showSheet(`<h3 style="margin-bottom: 16px;">Group Members</h3><p class="text-center text-muted">No members yet.</p>`);
+            return;
+        }
+
+        const profiles = await Promise.all(memberIds.map(async (id) => {
+            try {
+                const snap = await database.ref(`users/${id}/profile`).once('value');
+                return { id, ...(snap.val() || { username: 'User' }) };
+            } catch {
+                return { id, username: 'User' };
+            }
+        }));
+
+        showSheet(`
+            <h3 style="margin-bottom: 16px;">Group Members (${profiles.length})</h3>
+            <div style="max-height: 60vh; overflow-y: auto;">
+                ${profiles.map(p => `
+                    <div class="flex items-center gap-2 p-2" style="cursor:pointer; border-bottom: 1px solid rgba(0,0,0,0.06);" onclick="closeSheet(); viewUserProfile('${p.id}', '${escapeHtml(p.username || 'User').replace(/'/g, "\\'")}')">
+                        <div class="post-avatar comment-avatar" style="width:40px;height:40px;">
+                            ${p.avatar ? `<img src="${p.avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">` : (p.username?.[0]?.toUpperCase() || 'U')}
+                        </div>
+                        <div style="font-weight:600;">${escapeHtml(p.username || 'User')}${AppState.currentUser && p.id === AppState.currentUser.uid ? ' (You)' : ''}</div>
+                    </div>
+                `).join('')}
+            </div>
+        `);
+    } catch (error) {
+        console.error('Error loading group members:', error);
+        showSheet(`<h3 style="margin-bottom: 16px;">Group Members</h3><p class="text-center text-muted">Couldn't load members.</p>`);
+    }
+}
+
 async function loadGroupMessages(groupId) {
     const container = $('#group-chat-messages');
     if (!container) return;
@@ -243,7 +292,7 @@ function renderGroupMessage(msg) {
         bodyHTML = `
             <div class="group-msg-plan" onclick="navigateTo('planner')">
                 <i class="fas fa-calendar-check"></i>
-                <div style="font-weight:600;">${escapeHtml(msg.content || 'Shared a reading plan')}</div>
+                <div style="font-weight:600;">${escapeHtml(msg.content || 'Shared a study plan')}</div>
             </div>
         `;
     } else if (msg.type === 'reel') {
@@ -303,7 +352,7 @@ function showGroupAttachMenu() {
                 <i class="fas fa-book-bible"></i> Share Bible Verse
             </button>
             <button class="btn btn-outline btn-block" onclick="closeSheet(); sharePlanToGroup();">
-                <i class="fas fa-calendar-check"></i> Share Reading Plan
+                <i class="fas fa-calendar-check"></i> Share Study Plan
             </button>
         </div>
     `;
@@ -355,7 +404,7 @@ function shareVerseToGroup() {
 
 function sharePlanToGroup() {
     if (AppState.plannerData.length === 0) {
-        showToast('You have no reading plans to share yet', 'warning');
+        showToast('You have no study plans to share yet', 'warning');
         return;
     }
 
@@ -364,7 +413,7 @@ function sharePlanToGroup() {
         <div style="display: grid; gap: 8px;">
             ${AppState.plannerData.map((plan, i) => `
                 <button class="btn btn-outline btn-block" onclick="submitSharePlanToGroup(${i})">
-                    ${escapeHtml(plan.title || plan.planType || 'Reading Plan')}
+                    ${escapeHtml(plan.name || plan.title || plan.planType || 'Study Plan')}
                 </button>
             `).join('')}
         </div>
@@ -381,7 +430,7 @@ async function submitSharePlanToGroup(planIndex) {
         senderId: AppState.currentUser.uid,
         senderName: AppState.userProfile?.username || 'Anonymous',
         type: 'plan',
-        content: plan.title || plan.planType || 'Reading Plan',
+        content: plan.name || plan.title || plan.planType || 'Study Plan',
         timestamp: Date.now()
     };
 
@@ -394,7 +443,7 @@ async function submitSharePlanToGroup(planIndex) {
     }
 }
 
-/* ---- Public user profile (view/follow/friend/report) ---- */
+/* ---- Public user profile (view/connect/report) ---- */
 async function viewUserProfile(userId, displayName) {
     if (!userId) return;
 
@@ -404,15 +453,27 @@ async function viewUserProfile(userId, displayName) {
     }
 
     AppState.viewedProfileId = userId;
+    AppState.viewedProfileName = displayName || null;
+    navigateTo('view-profile');
+}
 
-    showSheet(`
-        <div class="text-center" style="padding: 20px 0;">
-            <div class="skeleton" style="width: 72px; height: 72px; border-radius: 50%; margin: 0 auto 12px;"></div>
-            <div class="skeleton" style="height: 18px; width: 140px; margin: 0 auto;"></div>
+async function renderViewProfilePage() {
+    const userId = AppState.viewedProfileId;
+    if (!userId) {
+        navigateTo('community');
+        return;
+    }
+
+    DOM.pageContainer.innerHTML = `
+        <div class="profile-container">
+            <div class="profile-header">
+                <div class="skeleton" style="width: 100px; height: 100px; border-radius: 50%; margin: 0 auto var(--spacing-md);"></div>
+                <div class="skeleton" style="height: 20px; width: 140px; margin: 0 auto;"></div>
+            </div>
         </div>
-    `);
+    `;
 
-    let profile = { username: displayName || 'User', bio: '' };
+    let profile = { username: AppState.viewedProfileName || 'User', bio: '' };
     try {
         const snapshot = await database.ref(`users/${userId}/profile`).once('value');
         if (snapshot.exists()) profile = { ...profile, ...snapshot.val() };
@@ -420,76 +481,134 @@ async function viewUserProfile(userId, displayName) {
         console.error('Error loading profile:', error);
     }
 
-    const isFollowing = AppState.userFollowing.has(userId);
-    const isFriend = AppState.userFriends.has(userId);
-    const name = escapeHtml(profile.username || displayName || 'User');
+    // Don't render a stale page if the user navigated away while this loaded.
+    if (AppState.viewedProfileId !== userId || AppState.currentRoute !== 'view-profile') return;
 
-    showSheet(`
-        <div class="text-center" style="padding: 12px 0 20px;">
-            <div class="post-avatar" style="width: 72px; height: 72px; font-size: 28px; margin: 0 auto 12px;">
-                ${name[0]?.toUpperCase() || 'U'}
+    const name = escapeHtml(profile.username || 'User');
+    const status = AppState.userConnections.get(userId) || null;
+
+    let connectButtonHTML;
+    if (status === 'brethren') {
+        connectButtonHTML = `
+            <button class="btn btn-outline btn-sm" onclick="removeBrethren('${userId}', '${name.replace(/'/g, "\\'")}')">
+                <i class="fas fa-people-arrows"></i> Brethren
+            </button>
+        `;
+    } else if (status === 'pending_sent') {
+        connectButtonHTML = `
+            <button class="btn btn-outline btn-sm" onclick="cancelConnectRequest('${userId}')">
+                <i class="fas fa-clock"></i> Pending
+            </button>
+        `;
+    } else if (status === 'pending_received') {
+        connectButtonHTML = `
+            <button class="btn btn-primary btn-sm" onclick="acceptConnectRequest('${userId}', '${name.replace(/'/g, "\\'")}')">
+                <i class="fas fa-check"></i> Accept Request
+            </button>
+        `;
+    } else {
+        connectButtonHTML = `
+            <button class="btn btn-primary btn-sm" onclick="sendConnectRequest('${userId}', '${name.replace(/'/g, "\\'")}')">
+                <i class="fas fa-people-arrows"></i> Connect
+            </button>
+        `;
+    }
+
+    DOM.pageContainer.innerHTML = `
+        <div class="profile-container">
+            <div class="profile-header">
+                <div class="profile-avatar">
+                    ${profile.avatar ? `<img src="${profile.avatar}" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">` : (name[0]?.toUpperCase() || 'U')}
+                </div>
+                <h2 style="font-weight: 700; margin-top: 8px;">${name}</h2>
+                <p style="color: var(--text-slate);">${escapeHtml(profile.bio || 'No bio yet')}</p>
+                ${status === 'pending_received' ? `<p style="font-size: 12px; color: var(--text-slate); margin-top: 4px;">Sent you a connection request</p>` : ''}
             </div>
-            <h3 style="margin-bottom: 4px;">${name}</h3>
-            ${profile.bio ? `<p class="text-muted" style="font-size: 14px;">${escapeHtml(profile.bio)}</p>` : ''}
+
+            <div class="flex gap-2 mb-4" style="justify-content: center; flex-wrap: wrap;">
+                ${connectButtonHTML}
+                <button class="btn btn-outline btn-sm" onclick="openConversation('${userId}', '${name.replace(/'/g, "\\'")}')">
+                    <i class="fas fa-comment-dots"></i> Chat
+                </button>
+                ${status === 'pending_received' ? `
+                    <button class="btn btn-outline btn-sm" onclick="declineConnectRequest('${userId}')">
+                        <i class="fas fa-xmark"></i> Decline
+                    </button>
+                ` : ''}
+            </div>
+
+            <div style="display:flex; justify-content:center; gap:20px; margin-bottom: 16px;">
+                <button class="text-muted" style="background:none; border:none; font-size: 13px; cursor:pointer;" onclick="reportUser('${userId}', '${name.replace(/'/g, "\\'")}')">
+                    <i class="fas fa-flag"></i> Report
+                </button>
+                <button class="text-muted" style="background:none; border:none; font-size: 13px; cursor:pointer;" onclick="blockUser('${userId}', '${name.replace(/'/g, "\\'")}')">
+                    <i class="fas fa-ban"></i> Block
+                </button>
+            </div>
         </div>
-        <div style="display: grid; gap: 8px;">
-            <button class="btn ${isFollowing ? 'btn-outline' : 'btn-primary'} btn-block" onclick="toggleFollowUser('${userId}')">
-                <i class="fas fa-user-plus"></i> ${isFollowing ? 'Following' : 'Follow'}
-            </button>
-            <button class="btn ${isFriend ? 'btn-outline' : 'btn-secondary'} btn-block" onclick="toggleFriendUser('${userId}', '${name.replace(/'/g, "\\'")}')">
-                <i class="fas fa-user-friends"></i> ${isFriend ? 'Friends' : 'Add Friend'}
-            </button>
-            <button class="btn btn-outline btn-block" onclick="closeSheet(); openConversation('${userId}', '${name.replace(/'/g, "\\'")}');">
-                <i class="fas fa-comment-dots"></i> Message
-            </button>
-            <button class="btn btn-outline btn-block" onclick="reportUser('${userId}', '${name.replace(/'/g, "\\'")}')">
-                <i class="fas fa-flag" style="color: #f44336;"></i> Report
-            </button>
-            <button class="btn btn-outline btn-block" onclick="blockUser('${userId}', '${name.replace(/'/g, "\\'")}')">
-                <i class="fas fa-ban" style="color: #f44336;"></i> Block
-            </button>
+    `;
+}
+
+async function sendConnectRequest(otherUid, displayName) {
+    if (!requireAuth('Sign in to connect with others.')) return;
+
+    const uid = AppState.currentUser.uid;
+    const myName = AppState.userProfile?.username || 'Anonymous';
+
+    try {
+        await database.ref(`users/${uid}/connections/${otherUid}`).set({ status: 'pending', direction: 'outgoing', timestamp: Date.now() });
+        await database.ref(`users/${otherUid}/connections/${uid}`).set({ status: 'pending', direction: 'incoming', timestamp: Date.now(), name: myName });
+        AppState.userConnections.set(otherUid, 'pending_sent');
+        showToast(`Connection request sent to ${displayName}`, 'success');
+        renderViewProfilePage();
+    } catch (error) {
+        showToast('Something went wrong', 'error');
+    }
+}
+
+async function cancelConnectRequest(otherUid) {
+    if (!AppState.currentUser) return;
+    const uid = AppState.currentUser.uid;
+
+    try {
+        await database.ref(`users/${uid}/connections/${otherUid}`).remove();
+        await database.ref(`users/${otherUid}/connections/${uid}`).remove();
+        AppState.userConnections.delete(otherUid);
+        showToast('Request cancelled', 'success');
+        renderViewProfilePage();
+    } catch (error) {
+        showToast('Something went wrong', 'error');
+    }
+}
+
+async function acceptConnectRequest(otherUid, displayName) {
+    if (!requireAuth('Sign in to accept connection requests.')) return;
+    const uid = AppState.currentUser.uid;
+
+    try {
+        await database.ref(`users/${uid}/connections/${otherUid}`).update({ status: 'accepted' });
+        await database.ref(`users/${otherUid}/connections/${uid}`).update({ status: 'accepted' });
+        AppState.userConnections.set(otherUid, 'brethren');
+        showToast(`You and ${displayName} are now Brethren!`, 'success');
+        renderViewProfilePage();
+    } catch (error) {
+        showToast('Something went wrong', 'error');
+    }
+}
+
+async function declineConnectRequest(otherUid) {
+    await cancelConnectRequest(otherUid);
+}
+
+function removeBrethren(otherUid, displayName) {
+    showModal(`
+        <h3 style="margin-bottom: 12px;">Remove ${escapeHtml(displayName)} as Brethren?</h3>
+        <p style="color: var(--text-slate); margin-bottom: 20px;">You can always reconnect later.</p>
+        <div style="display:flex; gap:8px;">
+            <button class="btn btn-outline btn-block" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-block" style="background:#f44336; color:white;" onclick="closeModal(); cancelConnectRequest('${otherUid}');">Remove</button>
         </div>
     `);
-}
-
-async function toggleFollowUser(userId) {
-    if (!requireAuth('Sign in to follow others.')) return;
-
-    const uid = AppState.currentUser.uid;
-    try {
-        if (AppState.userFollowing.has(userId)) {
-            await database.ref(`users/${uid}/following/${userId}`).remove();
-            AppState.userFollowing.delete(userId);
-            showToast('Unfollowed', 'success');
-        } else {
-            await database.ref(`users/${uid}/following/${userId}`).set(true);
-            AppState.userFollowing.add(userId);
-            showToast('Now following', 'success');
-        }
-        viewUserProfile(userId);
-    } catch (error) {
-        showToast('Something went wrong', 'error');
-    }
-}
-
-async function toggleFriendUser(userId, displayName) {
-    if (!requireAuth('Sign in to add friends.')) return;
-
-    const uid = AppState.currentUser.uid;
-    try {
-        if (AppState.userFriends.has(userId)) {
-            await database.ref(`users/${uid}/friends/${userId}`).remove();
-            AppState.userFriends.delete(userId);
-            showToast('Removed friend', 'success');
-        } else {
-            await database.ref(`users/${uid}/friends/${userId}`).set(true);
-            AppState.userFriends.add(userId);
-            showToast(`Friend request sent to ${displayName}`, 'success');
-        }
-        viewUserProfile(userId, displayName);
-    } catch (error) {
-        showToast('Something went wrong', 'error');
-    }
 }
 
 function reportUser(userId, displayName) {
@@ -556,9 +675,9 @@ function renderMessagesPage() {
         DOM.pageContainer.innerHTML = `
             <div class="text-center" style="padding: 60px 24px;">
                 <div class="empty-state-icon" style="margin: 0 auto 16px;"><i class="fas fa-envelope"></i></div>
-                <h3 style="margin-bottom: 8px;">Sign in to view messages</h3>
+                <h3 style="margin-bottom: 8px;">Sign in to view chats</h3>
                 <p class="text-muted" style="margin-bottom: 24px;">Connect and chat with others in the community.</p>
-                <button class="btn btn-primary" onclick="showAuthModal({message: 'Sign in to view your messages.'})">
+                <button class="btn btn-primary" onclick="showAuthModal({message: 'Sign in to view your chats.'})">
                     <i class="fas fa-right-to-bracket"></i> Sign In
                 </button>
             </div>
@@ -568,7 +687,7 @@ function renderMessagesPage() {
 
     DOM.pageContainer.innerHTML = `
         <div class="planner-container">
-            <h2 style="font-weight: 700; margin-bottom: 16px;">Messages</h2>
+            <h2 style="font-weight: 700; margin-bottom: 16px;">Chats</h2>
             <div id="dm-conversations-list">
                 <div class="skeleton" style="height: 64px; margin-bottom: 12px;"></div>
                 <div class="skeleton" style="height: 64px; margin-bottom: 12px;"></div>
@@ -596,7 +715,7 @@ async function loadDMConversations() {
             container.innerHTML = `
                 <div class="empty-state">
                     <div class="empty-state-icon"><i class="fas fa-envelope"></i></div>
-                    <h3 style="margin-bottom: 8px;">No Messages Yet</h3>
+                    <h3 style="margin-bottom: 8px;">No Chats Yet</h3>
                     <p style="color: var(--text-slate);">Visit someone's profile and tap Message to start a conversation.</p>
                 </div>
             `;
@@ -609,7 +728,10 @@ async function loadDMConversations() {
                     ${(conv.otherUserName || 'U')[0]?.toUpperCase() || 'U'}
                 </div>
                 <div class="conversation-item-main">
-                    <div style="font-weight: 600;">${escapeHtml(conv.otherUserName || 'User')}</div>
+                    <div style="font-weight: 600; display:flex; align-items:center; gap:6px;">
+                        ${escapeHtml(conv.otherUserName || 'User')}
+                        ${conv.streak > 0 ? `<span class="streak-badge"><i class="fas fa-fire"></i> ${conv.streak}</span>` : ''}
+                    </div>
                     <div style="font-size: 12px; color: var(--text-slate); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(conv.lastMessage || '')}</div>
                 </div>
                 <div style="font-size: 11px; color: var(--text-slate);">${conv.lastTimestamp ? formatDate(conv.lastTimestamp) : ''}</div>
@@ -640,7 +762,10 @@ async function renderDMThreadPage() {
             <div class="group-chat-header">
                 <button class="icon-btn" onclick="navigateTo('messages')"><i class="fas fa-arrow-left"></i></button>
                 <div style="flex:1; min-width:0; cursor:pointer;" onclick="viewUserProfile('${otherUid}', '${(AppState.currentDMUserName || 'User').replace(/'/g, "\\'")}')">
-                    <div style="font-weight:700;">${escapeHtml(AppState.currentDMUserName || 'User')}</div>
+                    <div style="font-weight:700; display:flex; align-items:center; gap:8px;">
+                        <span>${escapeHtml(AppState.currentDMUserName || 'User')}</span>
+                        <span id="dm-streak-badge"></span>
+                    </div>
                 </div>
             </div>
 
@@ -649,6 +774,9 @@ async function renderDMThreadPage() {
             </div>
 
             <div class="group-chat-input-row">
+                <button class="icon-btn" id="dm-attach-btn" aria-label="Attach">
+                    <i class="fas fa-paperclip"></i>
+                </button>
                 <input type="text" id="dm-message-input" class="chat-input" placeholder="Message..." onkeypress="if(event.key === 'Enter') sendDirectMessage()">
                 <button class="chat-send-btn" onclick="sendDirectMessage()">
                     <i class="fas fa-paper-plane"></i>
@@ -657,9 +785,58 @@ async function renderDMThreadPage() {
         </div>
     `;
 
-    if (DOM.topBarTitle) DOM.topBarTitle.textContent = AppState.currentDMUserName || 'Messages';
+    if (DOM.topBarTitle) DOM.topBarTitle.textContent = AppState.currentDMUserName || 'Chats';
+    $('#dm-attach-btn').addEventListener('click', showDMAttachMenu);
 
     await loadDMMessages();
+    await refreshDMStreakBadge();
+}
+
+async function refreshDMStreakBadge() {
+    const badge = $('#dm-streak-badge');
+    const uid = AppState.currentUser?.uid;
+    const otherUid = AppState.currentDMUserId;
+    if (!badge || !uid || !otherUid) return;
+
+    try {
+        const snapshot = await database.ref(`dmConversations/${getDMConversationId(uid, otherUid)}/streak/count`).once('value');
+        const count = snapshot.val() || 0;
+        badge.innerHTML = count > 0 ? `<span class="streak-badge"><i class="fas fa-fire"></i> ${count}</span>` : '';
+    } catch (error) {
+        console.error('Error loading streak:', error);
+    }
+}
+
+function renderDMMessage(msg, uid) {
+    const isMe = msg.senderId === uid;
+    let bodyHTML = '';
+
+    if (msg.type === 'bible') {
+        bodyHTML = `
+            <div class="group-msg-bible">
+                <i class="fas fa-book-bible"></i>
+                <div>
+                    <div style="font-weight:600;">${escapeHtml(msg.reference || '')}</div>
+                    <div style="font-size:13px;">"${escapeHtml(msg.content || '')}"</div>
+                </div>
+            </div>
+        `;
+    } else if (msg.type === 'plan') {
+        bodyHTML = `
+            <div class="group-msg-plan" onclick="navigateTo('planner')">
+                <i class="fas fa-calendar-check"></i>
+                <div style="font-weight:600;">${escapeHtml(msg.content || 'Shared a study plan')}</div>
+            </div>
+        `;
+    } else {
+        bodyHTML = `<p>${escapeHtml(msg.content || '')}</p>`;
+    }
+
+    return `
+        <div class="group-message ${isMe ? 'me' : ''}">
+            <div class="group-msg-bubble">${bodyHTML}</div>
+        </div>
+    `;
 }
 
 async function loadDMMessages() {
@@ -678,11 +855,7 @@ async function loadDMMessages() {
         if (list.length === 0) {
             container.innerHTML = `<p class="text-center text-muted" style="padding: 40px 20px;">Say hello 👋</p>`;
         } else {
-            container.innerHTML = list.map(msg => `
-                <div class="group-message ${msg.senderId === uid ? 'me' : ''}">
-                    <div class="group-msg-bubble"><p>${escapeHtml(msg.content || '')}</p></div>
-                </div>
-            `).join('');
+            container.innerHTML = list.map(msg => renderDMMessage(msg, uid)).join('');
         }
         container.scrollTop = container.scrollHeight;
     } catch (error) {
@@ -700,15 +873,30 @@ async function sendDirectMessage() {
 
     input.value = '';
 
+    await deliverDMMessage({ type: 'text', content });
+}
+
+/**
+ * Writes a message into the current DM thread and keeps both users'
+ * conversation indexes (dmIndex) up to date. Used by plain text, verse,
+ * and plan shares alike.
+ */
+async function deliverDMMessage(messageFields) {
+    const otherUid = AppState.currentDMUserId;
+    if (!AppState.currentUser || !otherUid) return;
+
     const uid = AppState.currentUser.uid;
     const conversationId = getDMConversationId(uid, otherUid);
     const myName = AppState.userProfile?.username || 'Anonymous';
+    const preview = messageFields.type === 'bible' ? `📖 ${messageFields.reference || 'Shared a verse'}`
+        : messageFields.type === 'plan' ? `📅 ${messageFields.content || 'Shared a study plan'}`
+        : messageFields.content;
 
     const msg = {
         senderId: uid,
         senderName: myName,
-        content,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        ...messageFields
     };
 
     try {
@@ -717,22 +905,145 @@ async function sendDirectMessage() {
 
         await database.ref(`users/${uid}/dmIndex/${otherUid}`).update({
             otherUserName: AppState.currentDMUserName || 'User',
-            lastMessage: content,
+            lastMessage: preview,
             lastTimestamp: Date.now(),
             conversationId
         });
 
         await database.ref(`users/${otherUid}/dmIndex/${uid}`).update({
             otherUserName: myName,
-            lastMessage: content,
+            lastMessage: preview,
             lastTimestamp: Date.now(),
             conversationId
         });
 
+        if (messageFields.type === 'bible') {
+            await updateDMStreak(conversationId, uid, otherUid);
+        }
+
         loadDMMessages();
+        refreshDMStreakBadge();
     } catch (error) {
         showToast('Failed to send message', 'error');
         console.error(error);
+    }
+}
+
+function showDMAttachMenu() {
+    if (!requireAuth('Sign in to share.')) return;
+
+    const sheetContent = `
+        <h3 style="margin-bottom: 12px;">Share</h3>
+        <div style="display: grid; gap: 8px;">
+            <button class="btn btn-outline btn-block" onclick="closeSheet(); shareVerseToDM();">
+                <i class="fas fa-book-bible"></i> Share Bible Verse
+            </button>
+            <button class="btn btn-outline btn-block" onclick="closeSheet(); sharePlanToDM();">
+                <i class="fas fa-calendar-check"></i> Share Study Plan
+            </button>
+        </div>
+    `;
+    showSheet(sheetContent);
+}
+
+function shareVerseToDM() {
+    const modalContent = `
+        <h3 style="margin-bottom: 16px;">Share a Verse</h3>
+        <div class="form-group">
+            <label class="form-label">Reference</label>
+            <input type="text" id="share-verse-ref" class="form-input" placeholder="e.g., John 3:16">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Verse Text</label>
+            <textarea id="share-verse-text" class="form-textarea" rows="3" placeholder="Paste or type the verse..."></textarea>
+        </div>
+        <button id="submit-share-verse-btn" class="btn btn-primary btn-block mt-3">Share</button>
+    `;
+    showModal(modalContent);
+
+    $('#submit-share-verse-btn').addEventListener('click', async () => {
+        const reference = $('#share-verse-ref').value.trim();
+        const text = $('#share-verse-text').value.trim();
+        if (!reference || !text) {
+            showToast('Please fill in both fields', 'warning');
+            return;
+        }
+
+        await deliverDMMessage({ type: 'bible', reference, content: text });
+        closeModal();
+    });
+}
+
+function sharePlanToDM() {
+    if (AppState.plannerData.length === 0) {
+        showToast('You have no study plans to share yet', 'warning');
+        return;
+    }
+
+    const modalContent = `
+        <h3 style="margin-bottom: 16px;">Share a Plan</h3>
+        <div style="display: grid; gap: 8px;">
+            ${AppState.plannerData.map((plan, i) => `
+                <button class="btn btn-outline btn-block" onclick="submitSharePlanToDM(${i})">
+                    ${escapeHtml(plan.name || plan.title || plan.planType || 'Study Plan')}
+                </button>
+            `).join('')}
+        </div>
+    `;
+    showModal(modalContent);
+}
+
+async function submitSharePlanToDM(planIndex) {
+    const plan = AppState.plannerData[planIndex];
+    if (!plan) return;
+
+    await deliverDMMessage({ type: 'plan', content: plan.name || plan.title || plan.planType || 'Study Plan' });
+    closeModal();
+}
+
+/* ---- Bible-verse streaks (Snapchat-style) ----
+   A streak day is only "completed" once BOTH participants in a DM have
+   shared at least one Bible verse on that calendar date. Consecutive
+   completed days increase the streak; a missed day resets it. */
+function getTodayDateString() {
+    return new Date().toISOString().split('T')[0];
+}
+
+function getYesterdayDateString() {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return d.toISOString().split('T')[0];
+}
+
+async function updateDMStreak(conversationId, uid, otherUid) {
+    const streakRef = database.ref(`dmConversations/${conversationId}/streak`);
+
+    try {
+        const result = await streakRef.transaction(current => {
+            const today = getTodayDateString();
+            const yesterday = getYesterdayDateString();
+            const streak = current || { count: 0, lastCompletedDate: null, activeDates: {} };
+            streak.activeDates = streak.activeDates || {};
+            streak.activeDates[uid] = today;
+
+            const otherActiveToday = streak.activeDates[otherUid] === today;
+            if (otherActiveToday && streak.lastCompletedDate !== today) {
+                streak.count = streak.lastCompletedDate === yesterday ? (streak.count || 0) + 1 : 1;
+                streak.lastCompletedDate = today;
+            }
+            return streak;
+        });
+
+        const count = result.committed ? (result.snapshot.val()?.count || 0) : 0;
+
+        // Denormalize into both users' conversation indexes for fast list rendering.
+        await database.ref(`users/${uid}/dmIndex/${otherUid}/streak`).set(count);
+        await database.ref(`users/${otherUid}/dmIndex/${uid}/streak`).set(count);
+
+        return count;
+    } catch (error) {
+        console.error('Error updating streak:', error);
+        return null;
     }
 }
 
@@ -975,8 +1286,98 @@ function openBookmark(reference) {
 }
 
 /* ============================================
-   SETTINGS PAGE
+   TALK TO SOMEONE (Safety & Support)
    ============================================ */
+function renderTalkToSomeonePage() {
+    DOM.pageContainer.innerHTML = `
+        <div class="talk-to-someone-container">
+            <div class="talk-to-someone-hero">
+                <div class="talk-to-someone-hero-icon"><i class="fas fa-hand-holding-heart"></i></div>
+                <h2 style="font-weight: 700; margin-bottom: 8px;">Talk to Someone</h2>
+                <p style="color: var(--text-slate); line-height: 1.6;">
+                    If you're going through something heavy — a mental health crisis, abuse, grief, or anything you shouldn't carry alone —
+                    a real person is ready to listen. Pastors, Christian counselors, and trained mentors are on the other end of this.
+                </p>
+            </div>
+
+            <div class="card">
+                <div class="form-group">
+                    <label class="form-label">Who would you feel most comfortable talking to?</label>
+                    <select id="tts-gender-pref" class="form-select">
+                        <option value="no preference">No preference</option>
+                        <option value="a male">A male counselor</option>
+                        <option value="a female">A female counselor</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">What kind of support are you looking for?</label>
+                    <select id="tts-role-pref" class="form-select">
+                        <option value="a pastor">Pastor</option>
+                        <option value="a Christian counselor">Christian Counselor</option>
+                        <option value="a mentor">Mentor</option>
+                        <option value="anyone available">Anyone available</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label">Anything you'd like them to know before you connect? (optional)</label>
+                    <textarea id="tts-note" class="form-textarea" rows="3" placeholder="Briefly, in your own words..."></textarea>
+                </div>
+
+                <button id="tts-proceed-btn" class="btn btn-primary btn-block mt-3">
+                    <i class="fab fa-whatsapp"></i> Proceed to WhatsApp
+                </button>
+                <p style="font-size: 12px; color: var(--text-slate); text-align:center; margin-top: 10px;">
+                    You'll be connected over WhatsApp. If you have a recent conversation with Shepherd, a short summary and reference link will be included so you don't have to repeat yourself.
+                </p>
+            </div>
+
+            <div class="card mt-3" style="text-align:center;">
+                <p style="font-size: 13px; color: var(--text-slate); margin-bottom: 4px;">In immediate danger or having thoughts of suicide?</p>
+                <p style="font-weight: 700;">Please contact your local emergency number or a crisis line right away.</p>
+            </div>
+        </div>
+    `;
+
+    $('#tts-proceed-btn').addEventListener('click', proceedToTalkToSomeone);
+}
+
+function proceedToTalkToSomeone() {
+    const genderPref = $('#tts-gender-pref')?.value || 'no preference';
+    const rolePref = $('#tts-role-pref')?.value || 'anyone available';
+    const note = $('#tts-note')?.value.trim();
+
+    const lines = [
+        `Hi, I'm using GraceGuide and would like to talk to ${rolePref}${genderPref !== 'no preference' ? ` (preferably ${genderPref})` : ''}.`
+    ];
+
+    if (note) {
+        lines.push(`A note from me: "${note}"`);
+    }
+
+    // Include a short excerpt of the Shepherd conversation the user was having,
+    // so the person on the other end has context without the user repeating themselves.
+    const recentMessages = (AppState.aiChatHistory || []).slice(-4);
+    if (recentMessages.length > 0) {
+        const excerpt = recentMessages
+            .map(m => `${m.role === 'user' ? 'Me' : 'Shepherd'}: ${truncate(m.content || '', 140)}`)
+            .join('\n');
+        lines.push(`Here's a bit of what I was just discussing with Shepherd:\n${excerpt}`);
+    }
+
+    const siteUrl = window.location.origin + window.location.pathname;
+    if (AppState.currentConversationId) {
+        lines.push(`Reference: ${siteUrl}#/ask (conversation ${AppState.currentConversationId})`);
+    }
+
+    const message = lines.join('\n\n');
+    const whatsappUrl = `https://wa.me/${TALK_TO_SOMEONE_WHATSAPP_NUMBER}?text=${encodeURIComponent(message)}`;
+
+    window.open(whatsappUrl, '_blank');
+}
+
+
 function renderSettingsPage() {
     DOM.pageContainer.innerHTML = `
         <div class="planner-container">
@@ -1019,8 +1420,8 @@ function renderSettingsPage() {
                 
                 <div class="flex items-center justify-between p-2">
                     <div>
-                        <div style="font-weight: 600;">Community Alerts</div>
-                        <div style="font-size: 12px; color: var(--text-slate);">Get notified about community activity</div>
+                        <div style="font-weight: 600;">Forum Alerts</div>
+                        <div style="font-size: 12px; color: var(--text-slate);">Get notified about forum activity</div>
                     </div>
                     <input type="checkbox" id="notif-community" checked style="width: 20px; height: 20px;">
                 </div>
@@ -1028,7 +1429,7 @@ function renderSettingsPage() {
             
             <div class="card mb-3">
                 <h3 style="font-weight: 600; margin-bottom: 16px;">About</h3>
-                <p style="line-height: 1.6; margin-bottom: 8px;">ADULLAM v1.0.0</p>
+                <p style="line-height: 1.6; margin-bottom: 8px;">GraceGuide v1.0.0</p>
                 <p style="font-size: 12px; color: var(--text-slate);">Your AI Christian Companion</p>
             </div>
             
@@ -1086,7 +1487,7 @@ async function addNotification(userId, notification) {
    ============================================ */
 function initEventListeners() {
     // Theme toggle
-    DOM.themeToggle.addEventListener('click', toggleTheme);
+    // Theme toggle now lives on the Settings page only.
     
     // Menu
     DOM.menuBtn.addEventListener('click', openDrawer);
@@ -1112,7 +1513,7 @@ function initEventListeners() {
     });
     
     // Logout
-    DOM.drawerLogout.addEventListener('click', handleLogout);
+    DOM.drawerLogout.addEventListener('click', handleDrawerAuthButtonClick);
     
     // Notifications
     DOM.notifBtn.addEventListener('click', () => {
@@ -1213,7 +1614,7 @@ function showNotificationPanel() {
    INITIALIZATION
    ============================================ */
 async function initApp() {
-    console.log('🚀 Initializing ADULLAM...');
+    console.log('🚀 Initializing GraceGuide...');
     
     // Initialize theme
     initTheme();
@@ -1230,7 +1631,7 @@ async function initApp() {
     // Initial route
     const initialRoute = window.location.hash.replace('#/', '') || 'home';
     
-    console.log('✅ ADULLAM initialized successfully');
+    console.log('✅ GraceGuide initialized successfully');
 }
 
 // Start the app when DOM is ready
@@ -1266,6 +1667,7 @@ window.deleteReel = deleteReel;
 window.confirmDeleteReel = confirmDeleteReel;
 window.showCreateGroupModal = showCreateGroupModal;
 window.openGroup = openGroup;
+window.showGroupMembers = showGroupMembers;
 window.joinGroup = joinGroup;
 window.sendGroupMessage = sendGroupMessage;
 window.showGroupAttachMenu = showGroupAttachMenu;
@@ -1273,8 +1675,11 @@ window.shareVerseToGroup = shareVerseToGroup;
 window.sharePlanToGroup = sharePlanToGroup;
 window.submitSharePlanToGroup = submitSharePlanToGroup;
 window.viewUserProfile = viewUserProfile;
-window.toggleFollowUser = toggleFollowUser;
-window.toggleFriendUser = toggleFriendUser;
+window.sendConnectRequest = sendConnectRequest;
+window.cancelConnectRequest = cancelConnectRequest;
+window.acceptConnectRequest = acceptConnectRequest;
+window.declineConnectRequest = declineConnectRequest;
+window.removeBrethren = removeBrethren;
 window.reportUser = reportUser;
 window.submitUserReport = submitUserReport;
 window.blockUser = blockUser;

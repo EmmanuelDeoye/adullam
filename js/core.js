@@ -1,5 +1,5 @@
 /* ============================================
-   ADULLAM — js/core.js
+   GraceGuide — js/core.js
    Load AFTER config.js.
    Contains: app state, DOM refs, utilities, theme,
    authentication, routing, home page, Bible reader.
@@ -31,9 +31,7 @@ const AppState = {
     highlights: [],
     notes: [],
     communityPosts: [],
-    userFollowing: new Set(),
-    userFollowers: new Set(),
-    userFriends: new Set(),
+    userConnections: new Map(), // otherUid -> 'pending_sent' | 'pending_received' | 'brethren'
     eventData: [],
     modalOpen: false,
     sheetOpen: false,
@@ -42,8 +40,9 @@ const AppState = {
     aiConversations: [],
     currentConversationId: null,
     viewedProfileId: null,
+    viewedProfileName: null,
     todayReflection: '',
-    selectedVoiceURI: null,
+    selectedVoiceId: null,
     reels: [],
     communityGroups: [],
     currentGroupId: null,
@@ -67,7 +66,6 @@ const DOM = {
     modalContainer: document.getElementById('modal-container'),
     sheetContainer: document.getElementById('sheet-container'),
     notifBadge: document.getElementById('notif-badge'),
-    themeToggle: document.getElementById('theme-toggle'),
     menuBtn: document.getElementById('menu-btn'),
     drawerClose: document.getElementById('drawer-close'),
     drawerLogout: document.getElementById('drawer-logout'),
@@ -245,7 +243,7 @@ function setLoading(isLoading) {
    THEME MANAGEMENT
    ============================================ */
 function initTheme() {
-    const savedTheme = localStorage.getItem('adullam_theme') || 'light';
+    const savedTheme = localStorage.getItem('graceguide_theme') || 'light';
     AppState.currentTheme = savedTheme;
     applyTheme(savedTheme);
 }
@@ -253,20 +251,14 @@ function initTheme() {
 function applyTheme(theme) {
     AppState.currentTheme = theme;
     document.documentElement.setAttribute('data-theme', theme);
-    localStorage.setItem('adullam_theme', theme);
-    
-    const icon = DOM.themeToggle.querySelector('i');
-    if (theme === 'dark') {
-        icon.className = 'fas fa-sun';
-    } else {
-        icon.className = 'fas fa-moon';
-    }
+    localStorage.setItem('graceguide_theme', theme);
 }
 
 function toggleTheme() {
     const newTheme = AppState.currentTheme === 'light' ? 'dark' : 'light';
     applyTheme(newTheme);
     showToast(`Theme switched to ${newTheme} mode`, 'success');
+    if (AppState.currentRoute === 'settings') renderSettingsPage();
 }
 
 /* ============================================
@@ -288,19 +280,20 @@ function initAuth() {
             AppState.notes = [];
             AppState.readingHistory = [];
             AppState.plannerData = [];
-            AppState.userFollowing = new Set();
-            AppState.userFriends = new Set();
+            AppState.userConnections = new Map();
             AppState.aiConversations = [];
         }
 
         updateProfileNavIcon();
+        updateDrawerAuthButton();
 
         if (!authReady) {
             // First auth check on load — the app is usable immediately,
             // signed in or not (guest mode).
             authReady = true;
             showMainApp();
-            navigateTo('home', { replace: true });
+            // Shepherd is the default landing page whenever the app opens fresh.
+            navigateTo('ask', { replace: true });
         } else {
             // Auth state changed mid-session (user signed in/out from the
             // modal) — refresh whatever page is currently showing.
@@ -334,14 +327,13 @@ async function loadUserData() {
     
     try {
         // Load bookmarks, highlights, notes, reading history
-        const [bookmarksSnap, highlightsSnap, notesSnap, historySnap, plannerSnap, followingSnap, friendsSnap] = await Promise.all([
+        const [bookmarksSnap, highlightsSnap, notesSnap, historySnap, plannerSnap, connectionsSnap] = await Promise.all([
             database.ref(`users/${uid}/bookmarks`).once('value'),
             database.ref(`users/${uid}/highlights`).once('value'),
             database.ref(`users/${uid}/notes`).once('value'),
             database.ref(`users/${uid}/readingHistory`).once('value'),
             database.ref(`users/${uid}/planner`).once('value'),
-            database.ref(`users/${uid}/following`).once('value'),
-            database.ref(`users/${uid}/friends`).once('value')
+            database.ref(`users/${uid}/connections`).once('value')
         ]);
         
         AppState.bookmarks = bookmarksSnap.val() || [];
@@ -349,8 +341,18 @@ async function loadUserData() {
         AppState.notes = notesSnap.val() || [];
         AppState.readingHistory = historySnap.val() || [];
         AppState.plannerData = plannerSnap.val() || [];
-        AppState.userFollowing = new Set(Object.keys(followingSnap.val() || {}));
-        AppState.userFriends = new Set(Object.keys(friendsSnap.val() || {}));
+        AppState.currentPlan = AppState.plannerData[0] || null;
+
+        AppState.userConnections = new Map();
+        const connections = connectionsSnap.val() || {};
+        Object.entries(connections).forEach(([otherUid, info]) => {
+            if (!info) return;
+            if (info.status === 'accepted') {
+                AppState.userConnections.set(otherUid, 'brethren');
+            } else if (info.status === 'pending') {
+                AppState.userConnections.set(otherUid, info.direction === 'incoming' ? 'pending_received' : 'pending_sent');
+            }
+        });
     } catch (error) {
         console.error('Error loading user data:', error);
     }
@@ -377,7 +379,6 @@ function showMainApp() {
  */
 function requireAuth(message, onAuthenticated) {
     if (AppState.currentUser) {
-        if (onAuthenticated) onAuthenticated();
         return true;
     }
     showAuthModal({ message, onSuccess: onAuthenticated });
@@ -392,7 +393,7 @@ function showAuthModal(options = {}) {
             <div class="auth-modal-icon">
                 <i class="fas fa-dove"></i>
             </div>
-            <h2 class="auth-title">Welcome to ADULLAM</h2>
+            <h2 class="auth-title">Welcome to GraceGuide</h2>
             <p class="auth-subtitle">${message ? escapeHtml(message) : 'Your AI Christian Companion'}</p>
             
             <div class="form-group">
@@ -433,7 +434,7 @@ function showAuthModal(options = {}) {
         $('.auth-submit-label').textContent = isSignUp ? 'Create Account' : 'Sign In';
         $('#auth-toggle-mode').textContent = isSignUp ? 'Back to Sign In' : 'Create Account';
         $('#auth-username-group').style.display = isSignUp ? 'block' : 'none';
-        $('.auth-subtitle').textContent = isSignUp ? 'Create your ADULLAM account' : (message || 'Your AI Christian Companion');
+        $('.auth-subtitle').textContent = isSignUp ? 'Create your GraceGuide account' : (message || 'Your AI Christian Companion');
     });
 
     $('#auth-submit').addEventListener('click', async () => {
@@ -541,6 +542,27 @@ function handleProfileNavClick() {
     }
 }
 
+/**
+ * The drawer footer button doubles as "Sign In" for guests. Once signed in,
+ * it's hidden entirely — signing out lives on the Settings page instead.
+ */
+function updateDrawerAuthButton() {
+    if (!DOM.drawerLogout) return;
+
+    if (AppState.currentUser) {
+        DOM.drawerLogout.classList.add('hidden');
+    } else {
+        DOM.drawerLogout.classList.remove('hidden');
+        DOM.drawerLogout.innerHTML = `<i class="fas fa-right-to-bracket"></i> Sign In`;
+    }
+}
+
+function handleDrawerAuthButtonClick() {
+    if (AppState.currentUser) return;
+    closeDrawer();
+    showAuthModal({ message: 'Sign in to your GraceGuide account.' });
+}
+
 function handleLogout() {
     auth.signOut().then(() => {
         AppState.currentUser = null;
@@ -613,6 +635,12 @@ function navigateTo(route, options = {}) {
         case 'settings':
             renderSettingsPage();
             break;
+        case 'talk-to-someone':
+            renderTalkToSomeonePage();
+            break;
+        case 'view-profile':
+            renderViewProfilePage();
+            break;
         default:
             renderHomePage();
     }
@@ -640,17 +668,19 @@ function updateNavigation(route) {
     
     // Update top bar title
     const titles = {
-        home: 'ADULLAM',
+        home: 'GraceGuide',
         bible: 'Bible',
         ask: 'Shepherd',
         reels: 'Reels',
-        community: 'Community',
-        planner: 'Bible Planner',
-        messages: 'Messages',
+        community: 'Forum',
+        planner: 'Study Planner',
+        messages: 'Chats',
         profile: 'My Profile',
-        settings: 'Settings'
+        settings: 'Settings',
+        'talk-to-someone': 'Talk to Someone',
+        'view-profile': AppState.viewedProfileName || 'Profile'
     };
-    DOM.topBarTitle.textContent = titles[route] || 'ADULLAM';
+    DOM.topBarTitle.textContent = titles[route] || 'GraceGuide';
 }
 
 function openDrawer() {
@@ -718,14 +748,9 @@ async function renderHomePage() {
                     <i class="fas fa-dove"></i> Ask Shepherd
                 </button>
                 <button class="btn btn-gold btn-sm" onclick="navigateTo('planner')">
-                    <i class="fas fa-calendar-check"></i> Plan Study
+                    <i class="fas fa-calendar-check"></i> Study Planner
                 </button>
-                <button class="btn btn-outline btn-sm" onclick="navigateTo('reels')">
-                    <i class="fas fa-play"></i> Reels
-                </button>
-                <button class="btn btn-outline btn-sm" onclick="navigateTo('community')">
-                    <i class="fas fa-users"></i> Community
-                </button>
+                
             </div>
 
             <!-- Meet Shepherd -->
@@ -863,6 +888,30 @@ const BIBLE_BOOK_CHAPTERS = {
 
 function getBookChapterCount(book) {
     return BIBLE_BOOK_CHAPTERS[book] || 1;
+}
+
+/**
+ * Parse a free-form Bible reference like "Romans 8:28-39", "Psalm 23",
+ * "1 Corinthians 13:4-7", or "John 3:16" into { book, chapter, verse }.
+ * Returns null if no known book name can be matched.
+ */
+function parsePassageReference(passage) {
+    if (!passage || typeof passage !== 'string') return null;
+
+    const match = passage.trim().match(/^((?:[1-3]\s+)?[A-Za-z][A-Za-z ]*?)\s+(\d+)(?::(\d+))?/);
+    if (!match) return null;
+
+    const rawBook = match[1].trim();
+    const chapter = parseInt(match[2], 10) || 1;
+    const verse = match[3] ? parseInt(match[3], 10) : null;
+
+    // Match case-insensitively against the known list of books.
+    const books = getBibleBooks();
+    const book = books.find(b => b.toLowerCase() === rawBook.toLowerCase())
+        || books.find(b => b.toLowerCase().startsWith(rawBook.toLowerCase()));
+
+    if (!book) return null;
+    return { book, chapter, verse };
 }
 
 function renderBiblePage() {
@@ -1340,7 +1389,7 @@ function bookmarkChapter(book, chapter) {
         .catch(() => showToast('Failed to bookmark', 'error'));
 }
 
-function openBibleChapter(book, chapter) {
+function openBibleChapter(book, chapter, verse) {
     navigateTo('bible');
     setTimeout(() => {
         const bookSelect = $('#bible-book-select');
@@ -1358,9 +1407,33 @@ function openBibleChapter(book, chapter) {
             }
             if (verseInput) verseInput.disabled = false;
             if (verseJumpBtn) verseJumpBtn.disabled = false;
-            loadBibleChapter(book, chapter);
+            loadBibleChapter(book, chapter).then(() => {
+                if (verse) {
+                    setTimeout(() => {
+                        const verseEl = $(`.bible-verse[data-verse="${verse}"]`);
+                        if (verseEl) {
+                            verseEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            verseEl.classList.add('verse-flash');
+                            setTimeout(() => verseEl.classList.remove('verse-flash'), 1500);
+                        }
+                    }, 200);
+                }
+            });
         }
     }, 300);
+}
+
+/**
+ * Open a passage referenced by a plain string such as "Romans 8:28-39".
+ * Falls back gracefully if the reference can't be parsed.
+ */
+function openPassageReference(passage) {
+    const parsed = parsePassageReference(passage);
+    if (!parsed) {
+        showToast("Couldn't open that passage — try browsing the Bible tab instead.", 'warning');
+        return;
+    }
+    openBibleChapter(parsed.book, parsed.chapter, parsed.verse);
 }
 
 function showSearchModal() {

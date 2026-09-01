@@ -1,5 +1,5 @@
 /* ============================================
-   ADULLAM — js/features.js
+   GraceGuide — js/features.js
    Load AFTER config.js and core.js.
    Contains: Shepherd AI chat, conversation history,
    the Bible reading planner, and Reels.
@@ -36,8 +36,7 @@ function renderAskPage() {
                     <div class="text-center text-muted" style="padding: 40px 20px;">
                         <i class="fas fa-dove" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
                         <h3 style="margin-bottom: 8px;">Ask Shepherd</h3>
-                        <p>What are you struggling with? 
-What questions do you have about the Bible and your Faith? let's talk about it.</p>
+                        <p>Ask me anything about faith, the Bible, or life. I'm here to help.</p>
                         
                         <div style="display: grid; gap: 8px; margin-top: 24px;">
                             <button class="btn btn-outline btn-sm" onclick="askSuggestedQuestion('What does the Bible say about anxiety?')">
@@ -82,27 +81,118 @@ function renderChatHistory() {
     if (!chatMessages || AppState.aiChatHistory.length === 0) return;
     
     chatMessages.innerHTML = AppState.aiChatHistory.map((msg, index) => `
-        <div class="chat-message ${msg.role === 'user' ? 'user' : 'ai'}">
-            <div class="chat-message-body">${msg.role === 'user' ? escapeHtml(msg.content) : formatAIText(msg.content)}</div>
+        <div class="chat-message ${msg.role === 'user' ? 'user' : 'ai'}" id="chat-msg-${index}">
+            ${msg.role === 'assistant' ? `
+                <button class="chat-listen-btn" id="listen-btn-${index}" onclick="toggleSpeakMessage(${index})" aria-label="Listen">
+                    <i class="fas fa-volume-high"></i> <span>Listen</span>
+                </button>
+            ` : ''}
+            <div class="chat-message-body">${msg.role === 'user' ? escapeHtml(msg.content) : linkifyBibleReferences(formatAIText(msg.content))}</div>
             ${msg.bibleRefs ? `
                 <div class="message-bible-ref">
                     <i class="fas fa-book-bible"></i> ${escapeHtml(msg.bibleRefs)}
                 </div>
             ` : ''}
             ${msg.action ? renderActionWidget(msg.action, msg.actionId) : ''}
+            ${msg.crisis ? renderCrisisBanner(msg.crisis) : ''}
             ${msg.role === 'assistant' ? `
-                <button class="chat-listen-btn" id="listen-btn-${index}" onclick="toggleSpeakMessage(${index})" aria-label="Listen">
-                    <i class="fas fa-volume-high"></i> <span>Listen</span>
-                </button>
+                <div class="chat-message-toolbar">
+                    <button class="icon-btn" onclick="copyMessageText(${index})" aria-label="Copy"><i class="fas fa-copy"></i></button>
+                    <button class="icon-btn" onclick="shareMessageText(${index})" aria-label="Share"><i class="fas fa-share-nodes"></i></button>
+                    <button class="icon-btn" onclick="postMessageToReels(${index})" aria-label="Post to Reels"><i class="fas fa-bullhorn"></i></button>
+                </div>
             ` : ''}
         </div>
     `).join('');
+}
+
+function linkifyBibleReferences(html) {
+    const pattern = /\b((?:[1-3]\s*)?(?:Genesis|Exodus|Leviticus|Numbers|Deuteronomy|Joshua|Judges|Ruth|Samuel|Kings|Chronicles|Ezra|Nehemiah|Esther|Job|Psalms?|Proverbs|Ecclesiastes|Song of Solomon|Isaiah|Jeremiah|Lamentations|Ezekiel|Daniel|Hosea|Joel|Amos|Obadiah|Jonah|Micah|Nahum|Habakkuk|Zephaniah|Haggai|Zechariah|Malachi|Matthew|Mark|Luke|John|Acts|Romans|Corinthians|Galatians|Ephesians|Philippians|Colossians|Thessalonians|Timothy|Titus|Philemon|Hebrews|James|Peter|Jude|Revelation)\s+\d+(?::\d+(?:\s*[-–]\s*\d+)?)?)\b/g;
+    return html.replace(pattern, (match) => {
+        const safe = match.replace(/'/g, "\\'");
+        return `<a href="javascript:void(0)" class="bible-ref-link" onclick="openPassageReference('${safe}')">${match}</a>`;
+    });
+}
+
+function copyMessageText(index) {
+    const msg = AppState.aiChatHistory[index];
+    if (!msg) return;
+
+    navigator.clipboard.writeText(msg.content).then(() => {
+        showToast('Copied to clipboard', 'success');
+    }).catch(() => {
+        showToast('Could not copy', 'error');
+    });
+}
+
+function shareMessageText(index) {
+    const msg = AppState.aiChatHistory[index];
+    if (!msg) return;
+
+    if (navigator.share) {
+        navigator.share({ title: 'Shepherd — GraceGuide', text: msg.content }).catch(() => {});
+    } else {
+        navigator.clipboard.writeText(msg.content).then(() => showToast('Copied for sharing', 'success'));
+    }
+}
+
+async function postMessageToReels(index) {
+    if (!requireAuth('Sign in to post.')) return;
+
+    const msg = AppState.aiChatHistory[index];
+    if (!msg) return;
+
+    const reel = {
+        id: generateId(),
+        authorId: AppState.currentUser.uid,
+        authorName: AppState.userProfile?.username || 'Anonymous',
+        type: 'text',
+        textContent: msg.content,
+        timestamp: Date.now(),
+        likes: {},
+        comments: {}
+    };
+
+    try {
+        await database.ref(`reels/${reel.id}`).set(reel);
+        showToast('Posted to Reels!', 'success');
+        navigateTo('reels');
+    } catch (error) {
+        showToast('Failed to post', 'error');
+        console.error(error);
+    }
+}
+
+function renderCrisisBanner(crisis) {
+    const category = crisis?.category || 'This sounds serious';
+    return `
+        <div class="crisis-banner">
+            <div class="crisis-banner-title"><i class="fas fa-hand-holding-heart"></i> You don't have to go through this alone</div>
+            <p>${escapeHtml(crisis?.message || "What you're describing matters, and a real person — a pastor, Christian counselor, or mentor — can support you better than I can here.")}</p>
+            <button class="btn btn-block" onclick="navigateTo('talk-to-someone')">
+                <i class="fas fa-comments"></i> Talk to Someone
+            </button>
+        </div>
+    `;
 }
 
 function scrollChatToBottom() {
     const chatMessages = $('#chat-messages');
     if (chatMessages) {
         chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+}
+
+/**
+ * Scrolls so the start of a given message (usually a fresh AI reply) is at
+ * the top of the visible chat area, rather than jumping to the bottom where
+ * only the tail of a long response would be visible.
+ */
+function scrollToMessageTop(index) {
+    const chatMessages = $('#chat-messages');
+    const el = document.getElementById(`chat-msg-${index}`);
+    if (chatMessages && el) {
+        chatMessages.scrollTop = el.offsetTop - 12;
     }
 }
 
@@ -174,11 +264,12 @@ async function sendChatMessage(override) {
             bibleRefs: aiResponse.bibleRefs,
             action: aiResponse.action || null,
             actionId,
+            crisis: aiResponse.crisis || null,
             timestamp: Date.now()
         });
         
         renderChatHistory();
-        scrollChatToBottom();
+        scrollToMessageTop(AppState.aiChatHistory.length - 1);
         
         // Save conversation to the database with a refined title
         saveCurrentConversation();
@@ -197,7 +288,7 @@ async function sendChatMessage(override) {
         });
         
         renderChatHistory();
-        scrollChatToBottom();
+        scrollToMessageTop(AppState.aiChatHistory.length - 1);
     }
 }
 
@@ -212,19 +303,85 @@ function discussReflectionWithShepherd() {
     }, 400);
 }
 
+/**
+ * Builds a compact summary of the signed-in user's profile and app
+ * activity so Shepherd can personalize its responses (e.g. reference
+ * their current study plan, streak, or recent reading).
+ */
+function buildShepherdUserContext() {
+    if (!AppState.currentUser) {
+        return 'The user is browsing as a guest (not signed in). Do not reference personal data that has not been shared in this conversation.';
+    }
+
+    const profile = AppState.userProfile || {};
+    const plan = AppState.currentPlan;
+    const recentBooks = AppState.readingHistory.slice(-5).map(h => `${h.book} ${h.chapter}`).join(', ') || 'none yet';
+    const groupCount = AppState.communityGroups?.filter(g => g.members && AppState.currentUser && g.members[AppState.currentUser.uid]).length || 0;
+    const brethrenCount = Array.from(AppState.userConnections.values()).filter(s => s === 'brethren').length;
+
+    const lines = [
+        `Signed-in user profile: username "${profile.username || 'Unknown'}"${profile.bio ? `, bio: "${profile.bio}"` : ''}.`,
+        `Bible reading: ${AppState.readingHistory.length} chapters read historically; most recently read: ${recentBooks}.`,
+        `Bookmarks: ${AppState.bookmarks.length}. Notes saved: ${AppState.notes.length}. Highlights: ${AppState.highlights.length}.`,
+        plan
+            ? `Active study plan: "${plan.name}" (${plan.type}), ${plan.completed || 0}/${plan.total || 0} days completed (${plan.progress || 0}%), current streak ${plan.streak || 0} days.`
+            : 'No active study plan yet.',
+        `Total study plans saved: ${AppState.plannerData.length}.`,
+        `Forum groups joined: ${groupCount}. Brethren (accepted connections): ${brethrenCount}.`,
+        `Prior Shepherd conversations saved: ${AppState.aiConversations.length}.`
+    ];
+
+    return `Here is what you know about the signed-in user from the app, for personalizing your response. Only bring these details up when naturally relevant — don't recite this list back to them:\n${lines.join('\n')}`;
+}
+
+/**
+ * Fast local backstop for crisis language. This runs on every outgoing
+ * user message *in addition to* asking the AI to self-report a crisis via
+ * §CRISIS§, so a banner still appears even if the model misses it.
+ */
+function detectCrisisKeywords(text) {
+    if (!text) return null;
+    const t = text.toLowerCase();
+
+    const patterns = [
+        { category: 'suicide', regex: /\b(kill myself|end my life|suicid|don'?t want to (live|be alive)|want to die|better off dead)\b/ },
+        { category: 'self_harm', regex: /\b(self.?harm|cutting myself|hurt(ing)? myself|harming myself)\b/ },
+        { category: 'abuse', regex: /\b(being abused|sexually abused|molest|being trafficked|someone is hurting me)\b/ },
+        { category: 'domestic_violence', regex: /\b(my (husband|wife|partner|boyfriend|girlfriend) (hits|hit|beats|beat) me|domestic violence|afraid (he|she) will hurt me)\b/ }
+    ];
+
+    for (const p of patterns) {
+        if (p.regex.test(t)) return { category: p.category };
+    }
+    return null;
+}
+
 async function callDeepSeekAI(message) {
-    const systemPrompt = `You are Shepherd, the AI-powered Christian companion inside the ADULLAM app. You are knowledgeable, compassionate, and biblically grounded. You reference the Bible when appropriate, provide specific verses, explain biblical context, encourage personal Bible study, and maintain a conversational, warm tone while remaining respectful. You distinguish between what Scripture says and areas where Christians may have different interpretations. You never present personal opinions as biblical facts.
+    const systemPrompt = `You are Shepherd, the AI-powered Christian companion inside the GraceGuide app. You are knowledgeable, compassionate, and biblically grounded. You reference the Bible when appropriate, provide specific verses, explain biblical context, encourage personal Bible study, and maintain a conversational, warm tone while remaining respectful. You distinguish between what Scripture says and areas where Christians may have different interpretations. You never present personal opinions as biblical facts.
 
 Formatting rules: Write in plain, natural sentences and short paragraphs. Do not use markdown symbols like **, ##, or bullet dashes, and do not use em dashes. If a list genuinely helps, write it as short plain sentences separated by line breaks instead of using markdown list syntax.
 
-Action rule: If, and only if, the user is clearly asking you to DO something the app can perform for them (create a Bible reading plan, publish something to the community feed, open a specific Bible passage, or save a note/prayer list as a downloadable file), end your reply with exactly one line in this exact machine-readable format and nothing after it:
+Action rule: If, and only if, the user is clearly asking you to DO something the app can perform for them (create a study plan, post a verse or share something to Reels, open a specific Bible passage, or save a note/prayer list as a downloadable file), end your reply with exactly one line in this exact machine-readable format and nothing after it:
 §ACTION§{"type":"create_plan|create_post|open_bible|download_file","label":"short button label","data":{...}}
 For create_plan, data may include planType, duration (days), description.
 For create_post, data may include content, reference, embedUrl.
-For open_bible, data must include book and chapter.
+For open_bible, data must include book, chapter, and optionally verse.
 For download_file, data must include filename and content.
-Omit the §ACTION§ line entirely for normal conversational replies.`;
-    
+Omit the §ACTION§ line entirely for normal conversational replies.
+
+Safety rule: If, and only if, the user's message describes suicidal thoughts, self-harm, sexual abuse, domestic violence, or another severe personal-safety crisis, respond first with a brief, warm, stabilizing message (do not counsel them at length, do not diagnose, do not moralize) and gently encourage them to reach out to a real person. Then end your reply with exactly one line in this exact machine-readable format:
+§CRISIS§{"category":"suicide|self_harm|abuse|domestic_violence|severe_crisis","message":"one short compassionate sentence encouraging them to talk to a real person"}
+A §CRISIS§ line can appear together with or instead of an §ACTION§ line, each on its own line. Omit it entirely for ordinary conversations, including ordinary sadness, doubt, or struggle that isn't an acute safety crisis.`;
+
+    const userContext = buildShepherdUserContext();
+
+    // Send recent conversation history so Shepherd has continuity within
+    // this conversation, not just the latest message in isolation.
+    const recentHistory = AppState.aiChatHistory
+        .slice(-12)
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => ({ role: m.role, content: m.content }));
+
     const response = await fetch(DEEPSEEK_API_URL, {
         method: 'POST',
         headers: {
@@ -235,6 +392,8 @@ Omit the §ACTION§ line entirely for normal conversational replies.`;
             model: 'deepseek-chat',
             messages: [
                 { role: 'system', content: systemPrompt },
+                { role: 'system', content: userContext },
+                ...recentHistory,
                 { role: 'user', content: message }
             ],
             temperature: 0.7,
@@ -249,15 +408,19 @@ Omit the §ACTION§ line entirely for normal conversational replies.`;
     const data = await response.json();
     const rawText = data.choices[0].message.content;
 
-    const { cleanText, action } = extractAIAction(rawText);
+    const { cleanText, action, crisis } = extractAIMeta(rawText);
 
     // Extract Bible references (simple pattern matching)
     const bibleRefs = extractBibleReferences(cleanText);
-    
+
+    // Local keyword backstop, in case the model didn't self-report.
+    const localCrisis = detectCrisisKeywords(message);
+
     return {
         text: cleanText,
         bibleRefs: bibleRefs,
-        action
+        action,
+        crisis: crisis || localCrisis
     };
 }
 
@@ -341,85 +504,101 @@ function stripMarkdownForSpeech(raw) {
 /* ============================================
    VOICE (Text-to-Speech for Shepherd's replies)
    ============================================ */
-let availableVoices = [];
-let currentUtterance = null;
-let currentSpeakingIndex = null;
-
-// Name fragments that reliably indicate a more natural-sounding voice
-// across Chrome, Edge, and Safari/iOS, so the 3-4 options we surface
-// aren't the flat default robotic system voice.
-const PREFERRED_VOICE_HINTS = [
-    'natural', 'neural', 'enhanced', 'premium', 'google us english',
-    'google uk english female', 'google uk english male',
-    'samantha', 'ava', 'siri', 'aria', 'jenny'
+// Curated Shepherd voices. The first two are genuine Azure Neural voices
+// with a Nigerian accent; the other two round out the set to 2 male + 2
+// female. These only work once AZURE_SPEECH_KEY is configured in config.js —
+// otherwise Shepherd falls back to whatever voices the device provides.
+const SHEPHERD_VOICES = [
+    { id: 'abeo', label: 'Abeo', gender: 'Male', accent: 'Nigerian', azureVoice: 'en-NG-AbeoNeural' },
+    { id: 'ezinne', label: 'Ezinne', gender: 'Female', accent: 'Nigerian', azureVoice: 'en-NG-EzinneNeural' },
+    { id: 'david', label: 'David', gender: 'Male', accent: 'American', azureVoice: 'en-US-GuyNeural' },
+    { id: 'aria', label: 'Aria', gender: 'Female', accent: 'American', azureVoice: 'en-US-AriaNeural' }
 ];
 
-function loadAvailableVoices() {
-    const all = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
-    const english = all.filter(v => v.lang && v.lang.toLowerCase().startsWith('en'));
-    const pool = english.length ? english : all;
+let availableVoices = [];
+let currentSpeakingIndex = null;
+let ttsAudioEl = null;
 
-    const scored = pool.map(v => {
-        const nameLower = v.name.toLowerCase();
-        const score = PREFERRED_VOICE_HINTS.some(hint => nameLower.includes(hint)) ? 1 : 0;
-        return { voice: v, score };
-    });
+function isCloudVoiceConfigured() {
+    return !!AZURE_SPEECH_KEY && AZURE_SPEECH_KEY !== 'YOUR_AZURE_SPEECH_KEY';
+}
 
-    scored.sort((a, b) => b.score - a.score);
-
-    // Dedupe by name and cap at 4 choices
-    const seen = new Set();
-    availableVoices = [];
-    for (const { voice } of scored) {
-        if (seen.has(voice.name)) continue;
-        seen.add(voice.name);
-        availableVoices.push(voice);
-        if (availableVoices.length >= 4) break;
-    }
-
-    // Default to a saved preference if it's still available, otherwise
-    // the first (best-ranked) voice.
-    const savedURI = localStorage.getItem('adullam_voice_uri');
-    if (savedURI && availableVoices.some(v => v.voiceURI === savedURI)) {
-        AppState.selectedVoiceURI = savedURI;
-    } else if (availableVoices.length > 0 && !AppState.selectedVoiceURI) {
-        AppState.selectedVoiceURI = availableVoices[0].voiceURI;
-    }
+function getSelectedVoiceOption() {
+    const savedId = localStorage.getItem('graceguide_voice_id');
+    return SHEPHERD_VOICES.find(v => v.id === savedId) || SHEPHERD_VOICES.find(v => v.id === AppState.selectedVoiceId) || SHEPHERD_VOICES[0];
 }
 
 function initVoices() {
-    if (!window.speechSynthesis) return;
-    loadAvailableVoices();
-    // Voice lists load asynchronously in some browsers (notably Chrome).
-    window.speechSynthesis.onvoiceschanged = loadAvailableVoices;
+    AppState.selectedVoiceId = localStorage.getItem('graceguide_voice_id') || SHEPHERD_VOICES[0].id;
+
+    // Keep a pool of on-device voices as a fallback for when Azure isn't configured.
+    if (window.speechSynthesis) {
+        const loadBrowserVoices = () => { availableVoices = window.speechSynthesis.getVoices() || []; };
+        loadBrowserVoices();
+        window.speechSynthesis.onvoiceschanged = loadBrowserVoices;
+    }
 }
 
-function getSelectedVoice() {
-    return availableVoices.find(v => v.voiceURI === AppState.selectedVoiceURI) || availableVoices[0] || null;
+function getTTSAudioElement() {
+    if (!ttsAudioEl) ttsAudioEl = new Audio();
+    return ttsAudioEl;
+}
+
+function buildSSML(text, azureVoiceName) {
+    const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return `<speak version="1.0" xml:lang="en-US"><voice name="${azureVoiceName}"><prosody rate="-4%" pitch="0%">${escaped}</prosody></voice></speak>`;
+}
+
+async function synthesizeAzureSpeech(text, azureVoiceName) {
+    const url = `https://${AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`;
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Ocp-Apim-Subscription-Key': AZURE_SPEECH_KEY,
+            'Content-Type': 'application/ssml+xml',
+            'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3'
+        },
+        body: buildSSML(text, azureVoiceName)
+    });
+
+    if (!response.ok) throw new Error('Azure Speech request failed');
+    const blob = await response.blob();
+    return URL.createObjectURL(blob);
+}
+
+// Rough heuristic so the on-device fallback at least leans toward the
+// gender of the persona the user picked (accent isn't controllable here).
+function pickBrowserVoiceForGender(gender) {
+    if (availableVoices.length === 0) return null;
+    const englishVoices = availableVoices.filter(v => v.lang?.toLowerCase().startsWith('en'));
+    const pool = englishVoices.length ? englishVoices : availableVoices;
+
+    const femaleHints = ['female', 'samantha', 'victoria', 'aria', 'jenny', 'zira', 'susan', 'karen', 'moira'];
+    const maleHints = ['male', 'david', 'guy', 'daniel', 'alex', 'fred', 'george', 'mark'];
+    const hints = gender === 'Male' ? maleHints : femaleHints;
+
+    const match = pool.find(v => hints.some(h => v.name.toLowerCase().includes(h)));
+    return match || pool[0];
 }
 
 function stopSpeaking() {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (ttsAudioEl) {
+        ttsAudioEl.pause();
+        ttsAudioEl.currentTime = 0;
+    }
     if (currentSpeakingIndex !== null) {
         const btn = document.getElementById(`listen-btn-${currentSpeakingIndex}`);
         if (btn) btn.classList.remove('speaking');
     }
-    currentUtterance = null;
     currentSpeakingIndex = null;
 }
 
-function toggleSpeakMessage(index) {
-    if (!window.speechSynthesis) {
-        showToast('Voice playback is not supported on this device', 'warning');
-        return;
-    }
-
-    // Tapping the message that's already playing stops it.
+async function toggleSpeakMessage(index) {
     if (currentSpeakingIndex === index) {
         stopSpeaking();
         return;
     }
-
     stopSpeaking();
 
     const msg = AppState.aiChatHistory[index];
@@ -428,54 +607,60 @@ function toggleSpeakMessage(index) {
     const text = stripMarkdownForSpeech(msg.content);
     if (!text) return;
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    const voice = getSelectedVoice();
-    if (voice) utterance.voice = voice;
-    utterance.rate = 0.98;
-    utterance.pitch = 1;
-    utterance.volume = 1;
-
+    const voice = getSelectedVoiceOption();
     const btn = document.getElementById(`listen-btn-${index}`);
 
-    utterance.onstart = () => {
-        currentSpeakingIndex = index;
-        if (btn) btn.classList.add('speaking');
-    };
-    utterance.onend = utterance.onerror = () => {
+    currentSpeakingIndex = index;
+    if (btn) btn.classList.add('speaking');
+
+    const onDone = () => {
         if (btn) btn.classList.remove('speaking');
         if (currentSpeakingIndex === index) currentSpeakingIndex = null;
-        currentUtterance = null;
     };
 
-    currentUtterance = utterance;
-    window.speechSynthesis.speak(utterance);
+    try {
+        if (isCloudVoiceConfigured()) {
+            const audioUrl = await synthesizeAzureSpeech(text, voice.azureVoice);
+            const audio = getTTSAudioElement();
+            audio.src = audioUrl;
+            audio.onended = onDone;
+            audio.onerror = onDone;
+            await audio.play();
+        } else {
+            if (!window.speechSynthesis) {
+                showToast('Voice playback is not supported on this device', 'warning');
+                onDone();
+                return;
+            }
+            const utterance = new SpeechSynthesisUtterance(text);
+            const browserVoice = pickBrowserVoiceForGender(voice.gender);
+            if (browserVoice) utterance.voice = browserVoice;
+            utterance.rate = 0.96;
+            utterance.pitch = voice.gender === 'Male' ? 0.9 : 1.05;
+            utterance.onend = onDone;
+            utterance.onerror = onDone;
+            window.speechSynthesis.speak(utterance);
+        }
+    } catch (error) {
+        console.error('TTS error:', error);
+        showToast('Voice playback failed', 'error');
+        onDone();
+    }
 }
 
 function showVoicePickerSheet() {
-    if (!window.speechSynthesis) {
-        showToast('Voice playback is not supported on this device', 'warning');
-        return;
-    }
-
-    if (availableVoices.length === 0) loadAvailableVoices();
-
-    const renderVoiceList = () => {
-        if (availableVoices.length === 0) {
-            return `<p class="text-center text-muted" style="padding: 20px 0;">No voices found on this device yet — try again in a moment.</p>`;
-        }
-        return availableVoices.map(v => `
-            <div class="voice-option ${v.voiceURI === AppState.selectedVoiceURI ? 'active' : ''}" data-voice-uri="${escapeHtml(v.voiceURI)}">
-                <div class="voice-option-info" onclick="selectVoice('${v.voiceURI.replace(/'/g, "\\'")}')">
-                    <div class="voice-option-name">${escapeHtml(v.name.replace(/^Google\s|^Microsoft\s/, ''))}</div>
-                    <div class="voice-option-lang">${escapeHtml(v.lang)}</div>
-                </div>
-                <button class="icon-btn" onclick="previewVoice('${v.voiceURI.replace(/'/g, "\\'")}')" aria-label="Preview voice">
-                    <i class="fas fa-play"></i>
-                </button>
-                <i class="fas fa-check voice-selected-check"></i>
+    const renderVoiceList = () => SHEPHERD_VOICES.map(v => `
+        <div class="voice-option ${v.id === getSelectedVoiceOption().id ? 'active' : ''}" data-voice-id="${v.id}">
+            <div class="voice-option-info" onclick="selectVoice('${v.id}')">
+                <div class="voice-option-name">${v.label} <span style="font-weight:400; color: var(--text-slate);">— ${v.gender}, ${v.accent}${v.accent === 'Nigerian' ? ' 🇳🇬' : ''}</span></div>
+                <div class="voice-option-lang">${isCloudVoiceConfigured() ? 'Natural neural voice' : 'On-device fallback (configure Azure Speech for the full voice)'}</div>
             </div>
-        `).join('');
-    };
+            <button class="icon-btn" onclick="previewVoice('${v.id}')" aria-label="Preview voice">
+                <i class="fas fa-play"></i>
+            </button>
+            <i class="fas fa-check voice-selected-check"></i>
+        </div>
+    `).join('');
 
     showSheet(`
         <h3 style="margin-bottom: 4px;">Shepherd's Voice</h3>
@@ -484,43 +669,68 @@ function showVoicePickerSheet() {
     `);
 }
 
-function selectVoice(voiceURI) {
-    AppState.selectedVoiceURI = voiceURI;
-    localStorage.setItem('adullam_voice_uri', voiceURI);
+function selectVoice(voiceId) {
+    AppState.selectedVoiceId = voiceId;
+    localStorage.setItem('graceguide_voice_id', voiceId);
 
     $$('.voice-option').forEach(el => {
-        el.classList.toggle('active', el.dataset.voiceUri === voiceURI);
+        el.classList.toggle('active', el.dataset.voiceId === voiceId);
     });
 
     showToast('Voice updated', 'success');
 }
 
-function previewVoice(voiceURI) {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
+async function previewVoice(voiceId) {
+    stopSpeaking();
+    const voice = SHEPHERD_VOICES.find(v => v.id === voiceId);
+    if (!voice) return;
 
-    const voice = availableVoices.find(v => v.voiceURI === voiceURI);
-    const utterance = new SpeechSynthesisUtterance("Peace be with you. This is how I'll sound.");
-    if (voice) utterance.voice = voice;
-    utterance.rate = 0.98;
-    utterance.pitch = 1;
-    window.speechSynthesis.speak(utterance);
+    const sampleText = "Peace be with you. This is how I'll sound.";
+
+    try {
+        if (isCloudVoiceConfigured()) {
+            const audioUrl = await synthesizeAzureSpeech(sampleText, voice.azureVoice);
+            const audio = getTTSAudioElement();
+            audio.src = audioUrl;
+            await audio.play();
+        } else if (window.speechSynthesis) {
+            const utterance = new SpeechSynthesisUtterance(sampleText);
+            const browserVoice = pickBrowserVoiceForGender(voice.gender);
+            if (browserVoice) utterance.voice = browserVoice;
+            utterance.rate = 0.96;
+            utterance.pitch = voice.gender === 'Male' ? 0.9 : 1.05;
+            window.speechSynthesis.speak(utterance);
+        }
+    } catch (error) {
+        console.error('Voice preview error:', error);
+        showToast('Could not preview this voice', 'error');
+    }
 }
 
 /* ---- AI-triggered action widgets ---- */
-function extractAIAction(text) {
-    const match = text.match(/§ACTION§(\{[\s\S]*\})\s*$/);
-    if (!match) return { cleanText: text, action: null };
-
+function extractAIMeta(text) {
+    let cleanText = text;
     let action = null;
-    try {
-        action = JSON.parse(match[1]);
-    } catch (e) {
-        action = null;
+    let crisis = null;
+
+    const actionMatch = text.match(/§ACTION§(\{[\s\S]*?\})\s*$/m) || text.match(/§ACTION§(\{[\s\S]*\})\s*$/);
+    const crisisMatch = text.match(/§CRISIS§(\{[\s\S]*?\})\s*$/m) || text.match(/§CRISIS§(\{[\s\S]*\})\s*$/);
+
+    // Strip whichever markers are present from the tail of the text, starting
+    // with whichever one appears later so earlier indices stay valid.
+    [actionMatch, crisisMatch]
+        .filter(Boolean)
+        .sort((a, b) => b.index - a.index)
+        .forEach(m => { cleanText = cleanText.slice(0, m.index).trimEnd(); });
+
+    if (actionMatch) {
+        try { action = JSON.parse(actionMatch[1]); } catch (e) { action = null; }
+    }
+    if (crisisMatch) {
+        try { crisis = JSON.parse(crisisMatch[1]); } catch (e) { crisis = null; }
     }
 
-    const cleanText = text.slice(0, match.index).trim();
-    return { cleanText, action };
+    return { cleanText: cleanText.trim(), action, crisis };
 }
 
 function renderActionWidget(action, actionId) {
@@ -576,26 +786,27 @@ async function executeAIAction(actionId) {
                     break;
                 }
                 const data = action.data || {};
-                const post = {
+                const reel = {
                     id: generateId(),
                     authorId: AppState.currentUser.uid,
                     authorName: AppState.userProfile?.username || 'Anonymous',
-                    content: data.content || action.label || '',
-                    bibleReference: data.reference || null,
-                    embedUrl: data.embedUrl || null,
+                    type: data.reference ? 'verses' : (data.embedUrl ? 'video' : 'text'),
+                    textContent: !data.reference && !data.embedUrl ? (data.content || action.label || '') : null,
+                    verses: data.reference ? [{ reference: data.reference, text: data.content || '' }] : null,
+                    videoUrl: data.embedUrl || null,
                     timestamp: Date.now(),
                     likes: {},
                     comments: {}
                 };
 
-                await database.ref(`community/posts/${post.id}`).set(post);
-                showToast('Posted to community!', 'success');
-                navigateTo('community');
+                await database.ref(`reels/${reel.id}`).set(reel);
+                showToast('Posted!', 'success');
+                navigateTo('reels');
                 break;
             }
             case 'open_bible': {
                 const data = action.data || {};
-                openBibleChapter(data.book || 'John', parseInt(data.chapter) || 1);
+                openBibleChapter(data.book || 'John', parseInt(data.chapter) || 1, data.verse ? parseInt(data.verse) : undefined);
                 break;
             }
             case 'download_file': {
@@ -604,7 +815,7 @@ async function executeAIAction(actionId) {
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement('a');
                 link.href = url;
-                link.download = data.filename || 'adullam-note.txt';
+                link.download = data.filename || 'graceguide-note.txt';
                 document.body.appendChild(link);
                 link.click();
                 link.remove();
@@ -857,18 +1068,26 @@ function extractBibleReferences(text) {
 }
 
 /* ============================================
-   BIBLE PLANNER
+   STUDY PLANNER
    ============================================ */
 function renderPlannerPage() {
     DOM.pageContainer.innerHTML = `
         <div class="planner-container">
             <div class="flex items-center justify-between mb-4">
-                <h2 style="font-weight: 700;">Bible Planner</h2>
+                <h2 style="font-weight: 700;">Study Planner</h2>
                 <button class="btn btn-primary btn-sm" onclick="createNewPlan()">
                     <i class="fas fa-plus"></i> New Plan
                 </button>
             </div>
-            
+
+            ${AppState.plannerData.length > 1 ? `
+                <div class="form-group" style="margin-bottom: 16px;">
+                    <select id="plan-switcher" class="form-select">
+                        ${AppState.plannerData.map(p => `<option value="${p.id}" ${p.id === AppState.currentPlan?.id ? 'selected' : ''}>${escapeHtml(p.name || 'Study Plan')}</option>`).join('')}
+                    </select>
+                </div>
+            ` : ''}
+
             <div class="planner-stats">
                 <div class="stat-card">
                     <div class="stat-value">${AppState.currentPlan?.progress || 0}%</div>
@@ -886,7 +1105,17 @@ function renderPlannerPage() {
             
             <div id="planner-content">
                 ${AppState.plannerData.length > 0 ? `
-                    <h3 style="font-weight: 600; margin-bottom: 16px;">Today's Reading</h3>
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 style="font-weight: 600;">${escapeHtml(AppState.currentPlan?.name || 'Reading')}</h3>
+                        <div style="display:flex; gap:8px;">
+                            <button class="btn btn-outline btn-sm" onclick="addPlannerDay()">
+                                <i class="fas fa-plus"></i> Add Entry
+                            </button>
+                            <button class="btn btn-outline btn-sm" onclick="deleteCurrentPlan()" style="color:#f44336; border-color:rgba(244,67,54,0.4);">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
                     ${renderPlannerDays()}
                 ` : `
                     <div class="empty-state">
@@ -894,7 +1123,7 @@ function renderPlannerPage() {
                             <i class="fas fa-calendar-check"></i>
                         </div>
                         <h3 style="margin-bottom: 8px;">No Active Plans</h3>
-                        <p style="color: var(--text-slate); margin-bottom: 16px;">Create your first Bible reading plan with AI assistance.</p>
+                        <p style="color: var(--text-slate); margin-bottom: 16px;">Create your first study plan with AI assistance.</p>
                         <button class="btn btn-primary" onclick="createNewPlan()">
                             <i class="fas fa-plus"></i> Create Plan
                         </button>
@@ -903,32 +1132,197 @@ function renderPlannerPage() {
             </div>
         </div>
     `;
+
+    const switcher = $('#plan-switcher');
+    if (switcher) {
+        switcher.addEventListener('change', (e) => switchPlan(e.target.value));
+    }
+}
+
+function switchPlan(planId) {
+    const plan = AppState.plannerData.find(p => p.id === planId);
+    if (!plan) return;
+    AppState.currentPlan = plan;
+    renderPlannerPage();
 }
 
 function renderPlannerDays() {
     if (!AppState.currentPlan || !AppState.currentPlan.days) return '';
-    
-    const today = new Date().toISOString().split('T')[0];
-    const todayPlan = AppState.currentPlan.days.find(d => d.date === today);
-    
-    return AppState.currentPlan.days.slice(0, 7).map(day => `
+
+    return AppState.currentPlan.days.map((day, index) => `
         <div class="planner-day ${day.completed ? 'completed' : ''}">
-            <div class="planner-day-checkbox ${day.completed ? 'checked' : ''}" onclick="togglePlannerDay('${day.date}')">
+            <div class="planner-day-checkbox ${day.completed ? 'checked' : ''}" onclick="event.stopPropagation(); togglePlannerDay('${day.date}')">
                 ${day.completed ? '<i class="fas fa-check"></i>' : ''}
             </div>
-            <div style="flex: 1;">
-                <div style="font-weight: 600;">${day.passage}</div>
-                <div style="font-size: 12px; color: var(--text-slate);">${day.topic}</div>
+            <div style="flex: 1; cursor: pointer;" onclick="openPassageReference('${escapeHtml(day.passage).replace(/'/g, "\\'")}')">
+                <div style="font-weight: 600;">${escapeHtml(day.passage)}</div>
+                <div style="font-size: 12px; color: var(--text-slate);">${escapeHtml(day.topic)}</div>
                 <div style="font-size: 12px; color: var(--text-slate);">${formatDate(day.date)}</div>
             </div>
-            <i class="fas fa-chevron-right" style="color: var(--text-slate);"></i>
+            <button class="icon-btn" aria-label="Edit entry" onclick="event.stopPropagation(); editPlannerDay(${index})">
+                <i class="fas fa-pen" style="font-size: 13px; color: var(--text-slate);"></i>
+            </button>
+            <button class="icon-btn" aria-label="Delete entry" onclick="event.stopPropagation(); deletePlannerDay(${index})">
+                <i class="fas fa-trash" style="font-size: 13px; color: #f44336;"></i>
+            </button>
+            <i class="fas fa-chevron-right" style="color: var(--text-slate); cursor: pointer;" onclick="openPassageReference('${escapeHtml(day.passage).replace(/'/g, "\\'")}')"></i>
         </div>
     `).join('');
 }
 
+function persistPlannerData() {
+    if (!AppState.currentUser) return;
+    const uid = AppState.currentUser.uid;
+    const planIndex = AppState.plannerData.findIndex(p => p.id === AppState.currentPlan.id);
+    if (planIndex !== -1) AppState.plannerData[planIndex] = AppState.currentPlan;
+    database.ref(`users/${uid}/planner`).set(AppState.plannerData);
+}
+
+function recalcPlanProgress() {
+    if (!AppState.currentPlan) return;
+    const days = AppState.currentPlan.days || [];
+    const completedDays = days.filter(d => d.completed);
+    AppState.currentPlan.total = days.length;
+    AppState.currentPlan.completed = completedDays.length;
+    AppState.currentPlan.progress = days.length ? Math.round((completedDays.length / days.length) * 100) : 0;
+}
+
+function addPlannerDay() {
+    if (!AppState.currentPlan) return;
+
+    const modalContent = `
+        <h3 style="margin-bottom: 16px;">Add Study Entry</h3>
+        <div class="form-group">
+            <label class="form-label">Passage</label>
+            <input type="text" id="entry-passage" class="form-input" placeholder="e.g., Romans 8:28-39">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Topic</label>
+            <input type="text" id="entry-topic" class="form-input" placeholder="e.g., Hope">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Date</label>
+            <input type="date" id="entry-date" class="form-input" value="${new Date().toISOString().split('T')[0]}">
+        </div>
+        <button id="save-entry-btn" class="btn btn-primary btn-block mt-3">Add Entry</button>
+    `;
+    showModal(modalContent);
+
+    $('#save-entry-btn').addEventListener('click', () => {
+        const passage = $('#entry-passage').value.trim();
+        const topic = $('#entry-topic').value.trim();
+        if (!passage) {
+            showToast('Please enter a passage', 'warning');
+            return;
+        }
+
+        AppState.currentPlan.days.push({
+            date: $('#entry-date').value || new Date().toISOString().split('T')[0],
+            passage,
+            topic: topic || 'Study',
+            completed: false
+        });
+
+        recalcPlanProgress();
+        persistPlannerData();
+        closeModal();
+        showToast('Entry added', 'success');
+        renderPlannerPage();
+    });
+}
+
+function editPlannerDay(index) {
+    if (!AppState.currentPlan || !AppState.currentPlan.days[index]) return;
+    const day = AppState.currentPlan.days[index];
+
+    const modalContent = `
+        <h3 style="margin-bottom: 16px;">Edit Study Entry</h3>
+        <div class="form-group">
+            <label class="form-label">Passage</label>
+            <input type="text" id="entry-passage" class="form-input" value="${escapeHtml(day.passage || '')}">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Topic</label>
+            <input type="text" id="entry-topic" class="form-input" value="${escapeHtml(day.topic || '')}">
+        </div>
+        <div class="form-group">
+            <label class="form-label">Reflection Question</label>
+            <textarea id="entry-reflection" class="form-textarea" rows="2">${escapeHtml(day.reflection_question || '')}</textarea>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Prayer Point</label>
+            <textarea id="entry-prayer" class="form-textarea" rows="2">${escapeHtml(day.prayer_point || '')}</textarea>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Date</label>
+            <input type="date" id="entry-date" class="form-input" value="${day.date || ''}">
+        </div>
+        <button id="save-entry-btn" class="btn btn-primary btn-block mt-3">Save Changes</button>
+    `;
+    showModal(modalContent);
+
+    $('#save-entry-btn').addEventListener('click', () => {
+        const passage = $('#entry-passage').value.trim();
+        if (!passage) {
+            showToast('Please enter a passage', 'warning');
+            return;
+        }
+
+        Object.assign(day, {
+            passage,
+            topic: $('#entry-topic').value.trim() || 'Study',
+            reflection_question: $('#entry-reflection').value.trim(),
+            prayer_point: $('#entry-prayer').value.trim(),
+            date: $('#entry-date').value || day.date
+        });
+
+        persistPlannerData();
+        closeModal();
+        showToast('Entry updated', 'success');
+        renderPlannerPage();
+    });
+}
+
+function deletePlannerDay(index) {
+    if (!AppState.currentPlan || !AppState.currentPlan.days[index]) return;
+
+    AppState.currentPlan.days.splice(index, 1);
+    recalcPlanProgress();
+    persistPlannerData();
+    showToast('Entry deleted', 'success');
+    renderPlannerPage();
+}
+
+function deleteCurrentPlan() {
+    if (!AppState.currentPlan) return;
+    const planId = AppState.currentPlan.id;
+
+    showModal(`
+        <h3 style="margin-bottom: 12px;">Delete this plan?</h3>
+        <p style="color: var(--text-slate); margin-bottom: 20px;">This will permanently remove "${escapeHtml(AppState.currentPlan.name || 'this plan')}" and all its entries.</p>
+        <div style="display:flex; gap:8px;">
+            <button class="btn btn-outline btn-block" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-block" style="background:#f44336; color:white;" onclick="confirmDeletePlan('${planId}')">Delete</button>
+        </div>
+    `);
+}
+
+function confirmDeletePlan(planId) {
+    AppState.plannerData = AppState.plannerData.filter(p => p.id !== planId);
+    AppState.currentPlan = AppState.plannerData[0] || null;
+
+    if (AppState.currentUser) {
+        database.ref(`users/${AppState.currentUser.uid}/planner`).set(AppState.plannerData);
+    }
+
+    closeModal();
+    showToast('Plan deleted', 'success');
+    renderPlannerPage();
+}
+
 function createNewPlan() {
     const modalContent = `
-        <h3 style="margin-bottom: 16px;">Create Bible Plan</h3>
+        <h3 style="margin-bottom: 16px;">Create Study Plan</h3>
         <p style="color: var(--text-slate); margin-bottom: 16px;">Let AI create a personalized plan for you.</p>
         
         <div class="form-group">
@@ -1110,28 +1504,14 @@ Respond with ONLY a JSON array (no markdown, no code fences, no commentary) of e
 
 function togglePlannerDay(date) {
     if (!AppState.currentPlan) return;
-    
+
     const day = AppState.currentPlan.days.find(d => d.date === date);
     if (day) {
         day.completed = !day.completed;
-        
-        // Update progress
-        const completedDays = AppState.currentPlan.days.filter(d => d.completed);
-        AppState.currentPlan.completed = completedDays.length;
-        AppState.currentPlan.progress = Math.round((completedDays.length / AppState.currentPlan.total) * 100);
-        
-        // Update planner data
-        const planIndex = AppState.plannerData.findIndex(p => p.id === AppState.currentPlan.id);
-        if (planIndex !== -1) {
-            AppState.plannerData[planIndex] = AppState.currentPlan;
-        }
-        
-        // Save to Firebase
-        if (AppState.currentUser) {
-            const uid = AppState.currentUser.uid;
-            database.ref(`users/${uid}/planner`).set(AppState.plannerData);
-        }
-        
+
+        recalcPlanProgress();
+        persistPlannerData();
+
         renderPlannerPage();
         showToast(day.completed ? 'Day completed!' : 'Day uncompleted', 'success');
     }
@@ -1631,7 +2011,7 @@ async function shareReel(reelId) {
     }
 
     if (navigator.share) {
-        navigator.share({ title: 'ADULLAM Reel', text: shareText }).catch(() => {});
+        navigator.share({ title: 'GraceGuide Reel', text: shareText }).catch(() => {});
     } else {
         navigator.clipboard.writeText(shareText).then(() => {
             showToast('Reel copied to clipboard!', 'success');

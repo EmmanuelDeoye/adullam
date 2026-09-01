@@ -31,9 +31,18 @@ const firebaseConfig = {
 const DEEPSEEK_API_KEY = "sk-836241f5b4e749f097e2f09ca7f4a152";
 const DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions";
 
+
+// Shepherd Voice (Text-to-Speech) Configuration
+// ⚠️ REPLACE WITH YOUR AZURE SPEECH RESOURCE KEY + REGION to enable natural,
+// non-robotic Neural voices — including two genuine Nigerian-accented voices
+// (en-NG-AbeoNeural / en-NG-EzinneNeural). Get a key at https://portal.azure.com
+// (Speech service, free tier available). Without a key, Shepherd automatically
+// falls back to the device's built-in browser voices, which sound more robotic
+// and won't have a Nigerian accent.
+const AZURE_SPEECH_KEY = "YOUR_AZURE_SPEECH_KEY";
+const AZURE_SPEECH_REGION = "eastus";
 // Initialize Firebase
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const database = firebase.database();
 const storage = firebase.storage();
-
