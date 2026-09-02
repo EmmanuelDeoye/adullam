@@ -22,7 +22,9 @@ const AppState = {
     unreadMessages: 0,
     aiChatHistory: [],
     moderationQueue: [],
-    cachedBibleVersions: ['KJV', 'NKJV', 'NLT', 'GOODNEWS', 'AMP'],
+    cachedBibleVersions: ['KJV', 'NLT', 'MSG', 'AMP'],
+    bibleIdMap: {},
+    bibleIdsResolving: null,
     isOnline: navigator.onLine,
     isLoading: false,
     currentPlan: null,
@@ -43,12 +45,14 @@ const AppState = {
     viewedProfileName: null,
     todayReflection: '',
     selectedVoiceId: null,
-    reels: [],
     communityGroups: [],
     currentGroupId: null,
     dmConversations: [],
     currentDMUserId: null,
-    currentDMUserName: null
+    currentDMUserName: null,
+    spacePosts: [],
+    interestProfile: null,
+    spaceStreak: { count: 0, lastPostDate: null }
 };
 
 /* ============================================
@@ -70,6 +74,7 @@ const DOM = {
     drawerClose: document.getElementById('drawer-close'),
     drawerLogout: document.getElementById('drawer-logout'),
     notifBtn: document.getElementById('notif-btn'),
+    spaceAddBtn: document.getElementById('space-add-btn'),
     profileNavBtn: document.getElementById('profile-nav-btn'),
     profileNavAvatar: document.getElementById('profile-nav-avatar')
 };
@@ -267,39 +272,80 @@ function toggleTheme() {
 let authReady = false;
 
 function initAuth() {
-    auth.onAuthStateChanged(async (user) => {
-        if (user) {
-            AppState.currentUser = user;
-            await loadUserProfile(user.uid);
-            await loadUserData();
-        } else {
-            AppState.currentUser = null;
-            AppState.userProfile = null;
-            AppState.bookmarks = [];
-            AppState.highlights = [];
-            AppState.notes = [];
-            AppState.readingHistory = [];
-            AppState.plannerData = [];
-            AppState.userConnections = new Map();
-            AppState.aiConversations = [];
-        }
+    // Safety net: no matter what happens with Firebase Auth (slow network,
+    // blocked script, offline device, a thrown error inside the callback),
+    // the splash screen must never be able to hang forever with no
+    // feedback. If the very first auth check hasn't resolved within a few
+    // seconds, drop the user into guest mode and let them retry signing in
+    // normally — instead of staring at a stuck loader.
+    const SPLASH_TIMEOUT_MS = 6000;
+    let settled = false;
 
+    const enterAppOnce = (isTimeout) => {
+        if (settled) return;
+        settled = true;
+        authReady = true;
         updateProfileNavIcon();
         updateDrawerAuthButton();
-
-        if (!authReady) {
-            // First auth check on load — the app is usable immediately,
-            // signed in or not (guest mode).
-            authReady = true;
-            showMainApp();
-            // Shepherd is the default landing page whenever the app opens fresh.
-            navigateTo('ask', { replace: true });
-        } else {
-            // Auth state changed mid-session (user signed in/out from the
-            // modal) — refresh whatever page is currently showing.
-            navigateTo(AppState.currentRoute, { replace: true });
+        showMainApp();
+        navigateTo('ask', { replace: true });
+        if (isTimeout) {
+            showToast("Taking longer than usual to connect — you're browsing as a guest for now.", 'warning');
         }
-    });
+    };
+
+    const splashTimer = setTimeout(() => enterAppOnce(true), SPLASH_TIMEOUT_MS);
+
+    try {
+        auth.onAuthStateChanged(async (user) => {
+            try {
+                if (user) {
+                    AppState.currentUser = user;
+                    await loadUserProfile(user.uid);
+                    await loadUserData();
+                } else {
+                    AppState.currentUser = null;
+                    AppState.userProfile = null;
+                    AppState.bookmarks = [];
+                    AppState.highlights = [];
+                    AppState.notes = [];
+                    AppState.readingHistory = [];
+                    AppState.plannerData = [];
+                    AppState.userConnections = new Map();
+                    AppState.aiConversations = [];
+                    if (typeof loadInterestProfile === 'function') await loadInterestProfile();
+                }
+
+                updateProfileNavIcon();
+                updateDrawerAuthButton();
+
+                if (!settled) {
+                    // First auth check resolved before the timeout — normal path.
+                    clearTimeout(splashTimer);
+                    enterAppOnce(false);
+                } else {
+                    // Auth state changed mid-session (user signed in/out from the
+                    // modal) — refresh whatever page is currently showing.
+                    navigateTo(AppState.currentRoute, { replace: true });
+                }
+            } catch (innerError) {
+                console.error('Error handling auth state change:', innerError);
+                clearTimeout(splashTimer);
+                enterAppOnce(false);
+                showToast('Something went wrong loading your account. You can try signing in again.', 'error');
+            }
+        }, (authError) => {
+            // Firebase's own error callback for onAuthStateChanged.
+            console.error('Firebase auth error:', authError);
+            clearTimeout(splashTimer);
+            enterAppOnce(true);
+        });
+    } catch (syncError) {
+        // Firebase itself failed to initialize (e.g. SDK didn't load).
+        console.error('Failed to start auth listener:', syncError);
+        clearTimeout(splashTimer);
+        enterAppOnce(true);
+    }
 }
 
 async function loadUserProfile(uid) {
@@ -359,6 +405,8 @@ async function loadUserData() {
     
     // Load notifications
     loadNotifications();
+    // Load the personalization profile (books/tags of interest)
+    if (typeof loadInterestProfile === 'function') loadInterestProfile();
 }
 
 function showMainApp() {
@@ -385,6 +433,49 @@ function requireAuth(message, onAuthenticated) {
     return false;
 }
 
+// Turns any Firebase Auth error into a short, plain-English sentence —
+// no error codes, no jargon — shown right in the modal as it happens.
+function describeAuthError(error) {
+    switch (error?.code) {
+        case 'auth/invalid-email':
+            return "That email address doesn't look right. Double-check it and try again.";
+        case 'auth/user-disabled':
+            return 'This account has been disabled. Contact support if you think this is a mistake.';
+        case 'auth/user-not-found':
+            return "We couldn't find an account with that email. Check the spelling, or create a new account.";
+        case 'auth/wrong-password':
+        case 'auth/invalid-credential':
+        case 'auth/invalid-login-credentials':
+            return "That password doesn't match this email. Try again, or reset your password below.";
+        case 'auth/missing-password':
+            return 'Please enter a password.';
+        case 'auth/email-already-in-use':
+            return 'An account already exists with this email. Try signing in instead.';
+        case 'auth/weak-password':
+            return 'Please choose a stronger password — at least 8 characters, with both letters and numbers.';
+        case 'auth/too-many-requests':
+            return "Too many attempts. Please wait a bit before trying again.";
+        case 'auth/network-request-failed':
+            return "We couldn't reach the server. Check your internet connection and try again.";
+        case 'auth/popup-closed-by-user':
+        case 'auth/cancelled-popup-request':
+            return 'The Google sign-in window was closed before finishing.';
+        case 'auth/popup-blocked':
+            return 'Your browser blocked the Google sign-in popup. Please allow popups for this site and try again.';
+        case 'auth/account-exists-with-different-credential':
+            return 'An account already exists with this email using a different sign-in method.';
+        default:
+            return error?.message || 'Something went wrong. Please try again.';
+    }
+}
+
+// Password rule: at least 8 characters, letters-and-numbers only, and must
+// contain at least one letter and one number.
+const PASSWORD_RULE_TEXT = 'Password must be at least 8 characters and contain both letters and numbers.';
+function isPasswordValid(password) {
+    return /^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{8,}$/.test(password || '');
+}
+
 function showAuthModal(options = {}) {
     const { message, onSuccess } = options;
 
@@ -395,30 +486,48 @@ function showAuthModal(options = {}) {
             </div>
             <h2 class="auth-title">Welcome to GraceGuide</h2>
             <p class="auth-subtitle">${message ? escapeHtml(message) : 'Your AI Christian Companion'}</p>
-            
+
+            <div id="auth-error-banner" class="auth-error-banner hidden">
+                <i class="fas fa-circle-exclamation"></i>
+                <span id="auth-error-text"></span>
+            </div>
+
+            <button id="auth-google-btn" class="btn btn-google btn-block">
+                <svg width="18" height="18" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.64-.06-1.25-.16-1.84H9v3.48h4.84a4.14 4.14 0 0 1-1.8 2.72v2.26h2.9c1.7-1.57 2.7-3.88 2.7-6.62z"/><path fill="#34A853" d="M9 18c2.43 0 4.47-.8 5.96-2.18l-2.9-2.26c-.8.54-1.84.86-3.06.86-2.35 0-4.34-1.59-5.05-3.72H.96v2.33A9 9 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.95 10.7A5.4 5.4 0 0 1 3.67 9c0-.59.1-1.17.28-1.7V4.97H.96A9 9 0 0 0 0 9c0 1.45.35 2.83.96 4.03l2.99-2.33z"/><path fill="#EA4335" d="M9 3.58c1.32 0 2.51.46 3.44 1.35l2.58-2.58C13.46.89 11.43 0 9 0A9 9 0 0 0 .96 4.97l2.99 2.33C4.66 5.17 6.65 3.58 9 3.58z"/></svg>
+                Continue with Google
+            </button>
+
+            <div class="auth-divider">or use your email</div>
+
             <div class="form-group">
                 <label class="form-label">Email</label>
-                <input type="email" id="auth-email" class="form-input" placeholder="Enter your email">
+                <input type="email" id="auth-email" class="form-input" placeholder="Enter your email" autocomplete="email">
             </div>
-            
+
             <div class="form-group">
                 <label class="form-label">Password</label>
-                <input type="password" id="auth-password" class="form-input" placeholder="Enter your password">
+                <div class="password-field-wrap">
+                    <input type="password" id="auth-password" class="form-input" placeholder="Enter your password" autocomplete="current-password">
+                    <button type="button" class="password-toggle-btn" id="auth-password-toggle" aria-label="Show password">
+                        <i class="fas fa-eye"></i>
+                    </button>
+                </div>
+                <p class="password-hint" id="auth-password-hint">${PASSWORD_RULE_TEXT}</p>
             </div>
-            
+
             <div class="form-group" id="auth-username-group" style="display: none;">
                 <label class="form-label">Username</label>
-                <input type="text" id="auth-username" class="form-input" placeholder="Choose a username">
+                <input type="text" id="auth-username" class="form-input" placeholder="Choose a username" autocomplete="nickname">
             </div>
-            
+
             <button id="auth-submit" class="btn btn-primary btn-block btn-lg mt-3">
                 <span class="auth-submit-label">Sign In</span>
             </button>
-            
+
             <div class="text-center mt-3">
                 <button id="auth-toggle-mode" class="btn btn-outline btn-sm">Create Account</button>
             </div>
-            
+
             <div class="text-center mt-2">
                 <button id="auth-reset" class="btn btn-sm" style="color: var(--text-slate);">Forgot Password?</button>
             </div>
@@ -429,26 +538,96 @@ function showAuthModal(options = {}) {
 
     let isSignUp = false;
 
+    const errorBanner = $('#auth-error-banner');
+    const errorText = $('#auth-error-text');
+    const passwordInput = $('#auth-password');
+    const passwordHint = $('#auth-password-hint');
+
+    function showAuthError(text) {
+        errorText.textContent = text;
+        errorBanner.classList.remove('hidden');
+    }
+    function clearAuthError() {
+        errorBanner.classList.add('hidden');
+    }
+
+    // Show/hide password toggle
+    $('#auth-password-toggle').addEventListener('click', () => {
+        const nowVisible = passwordInput.type === 'password';
+        passwordInput.type = nowVisible ? 'text' : 'password';
+        $('#auth-password-toggle i').className = nowVisible ? 'fas fa-eye-slash' : 'fas fa-eye';
+    });
+
+    // Live password validation feedback (sign-up mode only, where it matters)
+    passwordInput.addEventListener('input', () => {
+        if (!isSignUp) return;
+        const valid = isPasswordValid(passwordInput.value);
+        passwordHint.classList.toggle('invalid', passwordInput.value.length > 0 && !valid);
+    });
+
     $('#auth-toggle-mode').addEventListener('click', () => {
         isSignUp = !isSignUp;
+        clearAuthError();
         $('.auth-submit-label').textContent = isSignUp ? 'Create Account' : 'Sign In';
         $('#auth-toggle-mode').textContent = isSignUp ? 'Back to Sign In' : 'Create Account';
         $('#auth-username-group').style.display = isSignUp ? 'block' : 'none';
         $('.auth-subtitle').textContent = isSignUp ? 'Create your GraceGuide account' : (message || 'Your AI Christian Companion');
+        passwordHint.classList.remove('invalid');
+    });
+
+    $('#auth-google-btn').addEventListener('click', async () => {
+        clearAuthError();
+        const googleBtn = $('#auth-google-btn');
+        googleBtn.disabled = true;
+        googleBtn.classList.add('btn-loading');
+
+        try {
+            const provider = new firebase.auth.GoogleAuthProvider();
+            const result = await auth.signInWithPopup(provider);
+            const user = result.user;
+
+            // First-time Google sign-ins need a profile record, same as email sign-up.
+            const existingProfile = await database.ref(`users/${user.uid}/profile`).once('value');
+            if (!existingProfile.exists()) {
+                await database.ref(`users/${user.uid}/profile`).set({
+                    username: user.displayName || user.email?.split('@')[0] || 'User',
+                    bio: '',
+                    avatar: user.photoURL || '',
+                    createdAt: Date.now()
+                });
+            }
+
+            showToast(`Welcome, ${user.displayName || 'friend'}!`, 'success');
+            closeModal();
+            if (onSuccess) onSuccess();
+        } catch (error) {
+            showAuthError(describeAuthError(error));
+            googleBtn.disabled = false;
+            googleBtn.classList.remove('btn-loading');
+        }
     });
 
     $('#auth-submit').addEventListener('click', async () => {
+        clearAuthError();
         const email = $('#auth-email').value.trim();
         const password = $('#auth-password').value;
         const username = $('#auth-username')?.value.trim();
 
-        if (!email || !password) {
-            showToast('Please enter email and password', 'error');
+        if (!email) {
+            showAuthError('Please enter your email address.');
             return;
         }
-
+        if (!password) {
+            showAuthError('Please enter your password.');
+            return;
+        }
         if (isSignUp && !username) {
-            showToast('Please enter a username', 'error');
+            showAuthError('Please choose a username.');
+            return;
+        }
+        if (isSignUp && !isPasswordValid(password)) {
+            showAuthError(PASSWORD_RULE_TEXT);
+            passwordHint.classList.add('invalid');
             return;
         }
 
@@ -466,38 +645,27 @@ function showAuthModal(options = {}) {
                     avatar: '',
                     createdAt: Date.now()
                 });
-                showToast('Account created successfully!', 'success');
+
+                // Email verification — sent on every sign-up to cut down on fake accounts.
+                try {
+                    await userCredential.user.sendEmailVerification();
+                    showToast("Account created! We've sent a verification link to your email.", 'success');
+                } catch (verifyError) {
+                    console.error('Error sending verification email:', verifyError);
+                    showToast('Account created! (We could not send a verification email — you can resend it from Settings.)', 'warning');
+                }
             } else {
-                await auth.signInWithEmailAndPassword(email, password);
-                showToast('Welcome back!', 'success');
+                const userCredential = await auth.signInWithEmailAndPassword(email, password);
+                if (userCredential.user && !userCredential.user.emailVerified) {
+                    showToast("Welcome back! Reminder: your email isn't verified yet — check your inbox, or resend from Settings.", 'warning');
+                } else {
+                    showToast('Welcome back!', 'success');
+                }
             }
             closeModal();
             if (onSuccess) onSuccess();
         } catch (error) {
-            let errorMessage = 'Authentication failed';
-            switch (error.code) {
-                case 'auth/invalid-email':
-                    errorMessage = 'Invalid email address';
-                    break;
-                case 'auth/user-disabled':
-                    errorMessage = 'This account has been disabled';
-                    break;
-                case 'auth/user-not-found':
-                    errorMessage = 'No account found with this email';
-                    break;
-                case 'auth/wrong-password':
-                    errorMessage = 'Incorrect password';
-                    break;
-                case 'auth/email-already-in-use':
-                    errorMessage = 'Email is already registered';
-                    break;
-                case 'auth/weak-password':
-                    errorMessage = 'Password should be at least 6 characters';
-                    break;
-                default:
-                    errorMessage = error.message;
-            }
-            showToast(errorMessage, 'error');
+            showAuthError(describeAuthError(error));
             submitBtn.disabled = false;
             submitBtn.classList.remove('btn-loading');
             submitBtn.innerHTML = `<span class="auth-submit-label">${isSignUp ? 'Create Account' : 'Sign In'}</span>`;
@@ -505,19 +673,41 @@ function showAuthModal(options = {}) {
     });
 
     $('#auth-reset').addEventListener('click', async () => {
+        clearAuthError();
         const email = $('#auth-email').value.trim();
         if (!email) {
-            showToast('Please enter your email address', 'warning');
+            showAuthError('Enter your email address above first, then tap "Forgot Password?" again.');
             return;
         }
 
         try {
             await auth.sendPasswordResetEmail(email);
-            showToast('Password reset email sent!', 'success');
+            showToast(`Password reset email sent to ${email}. Check your inbox.`, 'success');
         } catch (error) {
-            showToast('Failed to send reset email', 'error');
+            showAuthError(describeAuthError(error));
         }
     });
+}
+
+/**
+ * Resends the verification email for the currently signed-in user.
+ * Exposed for use from the Settings page.
+ */
+async function resendVerificationEmail() {
+    if (!AppState.currentUser) {
+        showToast('Sign in first.', 'warning');
+        return;
+    }
+    if (AppState.currentUser.emailVerified) {
+        showToast('Your email is already verified!', 'success');
+        return;
+    }
+    try {
+        await AppState.currentUser.sendEmailVerification();
+        showToast('Verification email sent — check your inbox.', 'success');
+    } catch (error) {
+        showToast(describeAuthError(error), 'error');
+    }
 }
 
 function updateProfileNavIcon() {
@@ -617,8 +807,8 @@ function navigateTo(route, options = {}) {
         case 'planner':
             renderPlannerPage();
             break;
-        case 'reels':
-            renderReelsPage();
+        case 'space':
+            renderSpacePage();
             break;
         case 'messages':
             renderMessagesPage();
@@ -647,6 +837,9 @@ function navigateTo(route, options = {}) {
     
     // Scroll to top
     DOM.pageContainer.scrollTop = 0;
+
+    // The "add post" button only makes sense on the Space page.
+    if (DOM.spaceAddBtn) DOM.spaceAddBtn.classList.toggle('hidden', route !== 'space');
 }
 
 function updateNavigation(route) {
@@ -671,7 +864,7 @@ function updateNavigation(route) {
         home: 'GraceGuide',
         bible: 'Bible',
         ask: 'Shepherd',
-        reels: 'Reels',
+        space: 'Space',
         community: 'Forum',
         planner: 'Study Planner',
         messages: 'Chats',
@@ -800,7 +993,7 @@ async function renderHomePage() {
             <div class="card">
                 <h3 style="font-weight: 700; margin-bottom: 16px;">Recommended for You</h3>
                 <div id="recommendations-list">
-                    ${getRecommendations().map(rec => `
+                    ${getPersonalizedRecommendations().map(rec => `
                         <div class="flex items-center justify-between p-2" style="border-bottom: 1px solid rgba(0,0,0,0.06); cursor: pointer;" onclick="openBibleChapter('${rec.book}', ${rec.chapter})">
                             <div>
                                 <div style="font-weight: 600;">${rec.title}</div>
@@ -849,25 +1042,37 @@ async function getDailyReflection() {
     return reflections[dayOfYear % reflections.length];
 }
 
-function getRecommendations() {
-    return [
-        { book: 'Matthew', chapter: 5, title: 'The Beatitudes', reference: 'Matthew 5', duration: 5 },
-        { book: 'Psalm', chapter: 23, title: 'The Lord is My Shepherd', reference: 'Psalm 23', duration: 3 },
-        { book: 'Romans', chapter: 8, title: 'Life in the Spirit', reference: 'Romans 8', duration: 8 },
-        { book: 'Proverbs', chapter: 3, title: 'Trust in the Lord', reference: 'Proverbs 3', duration: 5 }
-    ];
-}
-
 /* ============================================
    BIBLE PAGE
    ============================================ */
 const BIBLE_VERSION_LABELS = {
     KJV: 'King James Version',
-    NKJV: 'New King James Version',
     NLT: 'New Living Translation',
-    GOODNEWS: 'Good News Translation',
+    MSG: 'The Message',
     AMP: 'Amplified Bible'
 };
+
+// api.bible identifies books by USFM codes rather than full names.
+const USFM_BOOK_IDS = {
+    'Genesis': 'GEN', 'Exodus': 'EXO', 'Leviticus': 'LEV', 'Numbers': 'NUM', 'Deuteronomy': 'DEU',
+    'Joshua': 'JOS', 'Judges': 'JDG', 'Ruth': 'RUT', '1 Samuel': '1SA', '2 Samuel': '2SA',
+    '1 Kings': '1KI', '2 Kings': '2KI', '1 Chronicles': '1CH', '2 Chronicles': '2CH', 'Ezra': 'EZR',
+    'Nehemiah': 'NEH', 'Esther': 'EST', 'Job': 'JOB', 'Psalm': 'PSA', 'Proverbs': 'PRO',
+    'Ecclesiastes': 'ECC', 'Song of Solomon': 'SNG', 'Isaiah': 'ISA', 'Jeremiah': 'JER', 'Lamentations': 'LAM',
+    'Ezekiel': 'EZK', 'Daniel': 'DAN', 'Hosea': 'HOS', 'Joel': 'JOL', 'Amos': 'AMO',
+    'Obadiah': 'OBA', 'Jonah': 'JON', 'Micah': 'MIC', 'Nahum': 'NAM', 'Habakkuk': 'HAB',
+    'Zephaniah': 'ZEP', 'Haggai': 'HAG', 'Zechariah': 'ZEC', 'Malachi': 'MAL',
+    'Matthew': 'MAT', 'Mark': 'MRK', 'Luke': 'LUK', 'John': 'JHN', 'Acts': 'ACT',
+    'Romans': 'ROM', '1 Corinthians': '1CO', '2 Corinthians': '2CO', 'Galatians': 'GAL', 'Ephesians': 'EPH',
+    'Philippians': 'PHP', 'Colossians': 'COL', '1 Thessalonians': '1TH', '2 Thessalonians': '2TH',
+    '1 Timothy': '1TI', '2 Timothy': '2TI', 'Titus': 'TIT', 'Philemon': 'PHM', 'Hebrews': 'HEB',
+    'James': 'JAS', '1 Peter': '1PE', '2 Peter': '2PE', '1 John': '1JN', '2 John': '2JN',
+    '3 John': '3JN', 'Jude': 'JUD', 'Revelation': 'REV'
+};
+
+function getUSFMBookId(book) {
+    return USFM_BOOK_IDS[book] || null;
+}
 
 const BIBLE_BOOK_CHAPTERS = {
     'Genesis': 50, 'Exodus': 40, 'Leviticus': 27, 'Numbers': 36, 'Deuteronomy': 34,
@@ -1107,10 +1312,33 @@ async function loadBibleChapter(book, chapter) {
         <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
         <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
     `;
-    
-    // Use free Bible API (this is a placeholder - you'd integrate with a proper Bible API)
-    // For demo purposes, we'll generate mock verses
-    const verses = await mockBibleAPI(book, chapter);
+
+    let verses = [];
+    let loadError = null;
+    try {
+        verses = await fetchBibleChapter(book, chapter, AppState.bibleVersion);
+    } catch (error) {
+        console.error('Error loading Bible chapter:', error);
+        loadError = error;
+    }
+
+    // Bail out quietly if the user has since navigated to a different
+    // book/chapter/page while this was loading.
+    if (AppState.currentBook !== book || AppState.currentChapter !== chapter || AppState.currentRoute !== 'bible') return;
+
+    if (loadError || verses.length === 0) {
+        $('#bible-content').innerHTML = `
+            <div class="text-center text-muted" style="padding: 60px 20px;">
+                <i class="fas fa-triangle-exclamation" style="font-size: 40px; opacity: 0.4; margin-bottom: 16px;"></i>
+                <h3 style="margin-bottom: 8px;">Couldn't load ${escapeHtml(book)} ${chapter}</h3>
+                <p style="margin-bottom: 16px;">${loadError ? escapeHtml(loadError.message || 'Something went wrong reaching the Bible service.') : 'No verses were returned.'}</p>
+                <button class="btn btn-outline btn-sm" onclick="loadBibleChapter('${book.replace(/'/g, "\\'")}', ${chapter})">
+                    <i class="fas fa-rotate-right"></i> Try Again
+                </button>
+            </div>
+        `;
+        return;
+    }
     
     // Update chapter navigation
     $('#chapter-navigation').style.display = 'flex';
@@ -1122,7 +1350,7 @@ async function loadBibleChapter(book, chapter) {
         ${verses.map(verse => `
             <div class="bible-verse" data-verse="${verse.verse}" onclick="toggleVerseSelection(${verse.verse})">
                 <span class="verse-number">${verse.verse}</span>
-                <span class="bible-text">${verse.text}</span>
+                <span class="bible-text">${escapeHtml(verse.text)}</span>
             </div>
         `).join('')}
     `;
@@ -1142,23 +1370,134 @@ async function loadBibleChapter(book, chapter) {
             AppState.readingHistory.push(historyEntry);
             await database.ref(`users/${uid}/readingHistory`).set(AppState.readingHistory);
         }
+
+        // Feed the personalization engine (see features.js) — reading a
+        // book is a strong signal of interest in it.
+        if (typeof recordInterestSignal === 'function') recordInterestSignal('book', book, 1);
     }
 }
 
-async function mockBibleAPI(book, chapter) {
-    // This is a placeholder - integrate with a real Bible API (using the
-    // selected AppState.bibleVersion) to fetch actual scripture text.
-    const verses = [];
-    const verseCount = Math.floor(Math.random() * 20) + 15; // Random verse count between 15-35
+/* ============================================
+   BIBLE TEXT — api.bible integration
+   ============================================
+   Replaces the old mockBibleAPI() placeholder with real scripture text
+   from https://scripture.api.bible, restricted to the four translations
+   configured in config.js (KJV, NLT, MSG, AMP). Bible IDs are resolved
+   dynamically from the account's available Bibles (rather than hard-coded)
+   so this keeps working even if the exact IDs on api.bible change. */
+async function resolveBibleIds() {
+    if (Object.keys(AppState.bibleIdMap).length > 0) return AppState.bibleIdMap;
+    if (AppState.bibleIdsResolving) return AppState.bibleIdsResolving;
 
-    for (let i = 1; i <= verseCount; i++) {
-        verses.push({
-            verse: i,
-            text: `This is a placeholder for ${book} ${chapter}:${i} (${AppState.bibleVersion}). Integrate with a proper Bible API to get real scripture text. The verse continues with meaningful content about faith, hope, and love in the context of biblical teaching.`
+    AppState.bibleIdsResolving = (async () => {
+        // Cache in localStorage so we don't re-fetch the full Bible list
+        // (which can be large) on every reload.
+        const cached = localStorage.getItem('graceguide_bible_id_map');
+        if (cached) {
+            try {
+                const parsed = JSON.parse(cached);
+                if (parsed && Object.keys(parsed).length > 0) {
+                    AppState.bibleIdMap = parsed;
+                    return parsed;
+                }
+            } catch (e) { /* fall through to re-fetch */ }
+        }
+
+        const response = await fetch(`${BIBLE_API_BASE}/bibles?language=eng`, {
+            headers: { 'api-key': BIBLE_API_KEY }
         });
-    }
+        if (!response.ok) throw new Error(`Bible list request failed (${response.status})`);
+        const json = await response.json();
+        const bibles = json.data || [];
+
+        const map = {};
+        Object.keys(BIBLE_VERSIONS).forEach(code => {
+            // Prefer an exact abbreviation match, then fall back to a
+            // known bibleId hint from config.js, then a name match.
+            const byAbbr = bibles.find(b => (b.abbreviation || '').toUpperCase() === code);
+            const byHint = bibles.find(b => b.id === BIBLE_VERSIONS[code]);
+            const byName = bibles.find(b => (b.abbreviationLocal || '').toUpperCase() === code);
+            const found = byAbbr || byHint || byName;
+            if (found) map[code] = found.id;
+        });
+
+        if (Object.keys(map).length === 0) throw new Error('None of the configured Bible versions were found for this API key.');
+
+        AppState.bibleIdMap = map;
+        localStorage.setItem('graceguide_bible_id_map', JSON.stringify(map));
+        AppState.cachedBibleVersions = Object.keys(map);
+        return map;
+    })().catch(error => {
+        AppState.bibleIdsResolving = null;
+        throw error;
+    });
+
+    return AppState.bibleIdsResolving;
+}
+
+/**
+ * Parses the HTML content api.bible returns for a chapter (with
+ * include-verse-spans=true) into a flat [{ verse, text }] array, since the
+ * rest of the app renders one row per verse.
+ */
+function parseVerseSpansFromHTML(html) {
+    const container = document.createElement('div');
+    container.innerHTML = html;
+
+    const verses = [];
+    let currentVerse = null;
+    let buffer = '';
+
+    const flush = () => {
+        if (currentVerse !== null) {
+            const text = buffer.replace(/\s+/g, ' ').trim();
+            if (text) verses.push({ verse: currentVerse, text });
+        }
+        buffer = '';
+    };
+
+    const walk = (node) => {
+        node.childNodes.forEach(child => {
+            if (child.nodeType === Node.TEXT_NODE) {
+                buffer += child.textContent;
+            } else if (child.nodeType === Node.ELEMENT_NODE) {
+                if (child.classList && child.classList.contains('v') && child.dataset.number) {
+                    flush();
+                    currentVerse = parseInt(child.dataset.number, 10);
+                } else {
+                    walk(child);
+                }
+            }
+        });
+    };
+
+    walk(container);
+    flush();
 
     return verses;
+}
+
+async function fetchBibleChapter(book, chapter, version) {
+    const bookId = getUSFMBookId(book);
+    if (!bookId) throw new Error(`Unknown Bible book: ${book}`);
+
+    const idMap = await resolveBibleIds();
+    const bibleId = idMap[version] || idMap[AppState.cachedBibleVersions[0]];
+    if (!bibleId) throw new Error(`The ${version} translation isn't available with this API key.`);
+
+    const url = `${BIBLE_API_BASE}/bibles/${bibleId}/chapters/${bookId}.${chapter}?content-type=html&include-verse-spans=true&include-notes=false&include-titles=false`;
+    const response = await fetch(url, { headers: { 'api-key': BIBLE_API_KEY } });
+
+    if (!response.ok) {
+        if (response.status === 401 || response.status === 403) throw new Error('The Bible API key was rejected. Check BIBLE_API_KEY in config.js.');
+        throw new Error(`Bible service returned an error (${response.status}).`);
+    }
+
+    const json = await response.json();
+    const html = json?.data?.content;
+    if (!html) throw new Error('No content returned for this chapter.');
+
+    return parseVerseSpansFromHTML(html);
 }
 
 function toggleVerseSelection(verseNumber) {
@@ -1199,8 +1538,8 @@ function showVerseActions() {
             <button class="btn btn-outline btn-block" onclick="shareSelectedVerses()">
                 <i class="fas fa-share"></i> Share
             </button>
-            <button class="btn btn-gold btn-block" onclick="postSelectedVersesAsReel()">
-                <i class="fas fa-play"></i> Post as Reel
+            <button class="btn btn-gold btn-block" onclick="postSelectedVersesToSpace()">
+                <i class="fas fa-layer-group"></i> Post to Space
             </button>
             <button class="btn btn-accent btn-block" onclick="askAIAboutSelectedVerses()">
                 <i class="fas fa-dove"></i> Ask Shepherd
@@ -1211,7 +1550,7 @@ function showVerseActions() {
     showSheet(sheetContent);
 }
 
-function postSelectedVersesAsReel() {
+function postSelectedVersesToSpace() {
     if (AppState.selectedVerses.size === 0) return;
 
     const verses = Array.from(AppState.selectedVerses).sort((a, b) => a - b).map(v => {
@@ -1226,7 +1565,7 @@ function postSelectedVersesAsReel() {
     });
 
     closeSheet();
-    showCreateReelModal({
+    showCreateSpacePostModal({
         verses,
         sourceBook: AppState.currentBook,
         sourceChapter: AppState.currentChapter

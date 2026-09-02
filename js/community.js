@@ -1,7 +1,7 @@
 /* ============================================
    GraceGuide — js/community.js
    Load AFTER config.js, core.js, and features.js.
-   Contains: Reels, Forum Groups, public profile
+   Contains: Space, Forum Groups, public profile
    view/connect/report/block, Direct Messages,
    Profile page, Settings, notifications, event
    listeners, and app initialization/bootstrap.
@@ -297,9 +297,9 @@ function renderGroupMessage(msg) {
         `;
     } else if (msg.type === 'reel') {
         bodyHTML = `
-            <div class="group-msg-reel" onclick="navigateTo('reels')">
-                <i class="fas fa-play"></i>
-                <div style="font-weight:600;">Shared a reel</div>
+            <div class="group-msg-reel" onclick="navigateTo('space')">
+                <i class="fas fa-compass"></i>
+                <div style="font-weight:600;">Shared a Space post</div>
             </div>
         `;
     } else {
@@ -527,9 +527,15 @@ async function renderViewProfilePage() {
 
             <div class="flex gap-2 mb-4" style="justify-content: center; flex-wrap: wrap;">
                 ${connectButtonHTML}
-                <button class="btn btn-outline btn-sm" onclick="openConversation('${userId}', '${name.replace(/'/g, "\\'")}')">
-                    <i class="fas fa-comment-dots"></i> Chat
-                </button>
+                ${status === 'brethren' ? `
+                    <button class="btn btn-outline btn-sm" onclick="openConversation('${userId}', '${name.replace(/'/g, "\\'")}')">
+                        <i class="fas fa-comment-dots"></i> Chat
+                    </button>
+                ` : `
+                    <button class="btn btn-outline btn-sm" style="opacity:0.6;" onclick="showToast('Become Brethren first to chat with ${name.replace(/'/g, "\\'")}', 'warning')">
+                        <i class="fas fa-lock"></i> Chat
+                    </button>
+                `}
                 ${status === 'pending_received' ? `
                     <button class="btn btn-outline btn-sm" onclick="declineConnectRequest('${userId}')">
                         <i class="fas fa-xmark"></i> Decline
@@ -556,9 +562,19 @@ async function sendConnectRequest(otherUid, displayName) {
     const myName = AppState.userProfile?.username || 'Anonymous';
 
     try {
-        await database.ref(`users/${uid}/connections/${otherUid}`).set({ status: 'pending', direction: 'outgoing', timestamp: Date.now() });
+        await database.ref(`users/${uid}/connections/${otherUid}`).set({ status: 'pending', direction: 'outgoing', timestamp: Date.now(), name: displayName || 'User' });
         await database.ref(`users/${otherUid}/connections/${uid}`).set({ status: 'pending', direction: 'incoming', timestamp: Date.now(), name: myName });
         AppState.userConnections.set(otherUid, 'pending_sent');
+
+        // Surface it in the recipient's notification center, where they can
+        // accept or decline right there.
+        await addNotification(otherUid, {
+            type: 'connection_request',
+            fromUid: uid,
+            fromName: myName,
+            message: `${myName} wants to connect with you as Brethren`
+        });
+
         showToast(`Connection request sent to ${displayName}`, 'success');
         renderViewProfilePage();
     } catch (error) {
@@ -575,7 +591,7 @@ async function cancelConnectRequest(otherUid) {
         await database.ref(`users/${otherUid}/connections/${uid}`).remove();
         AppState.userConnections.delete(otherUid);
         showToast('Request cancelled', 'success');
-        renderViewProfilePage();
+        if (AppState.currentRoute === 'view-profile' && AppState.viewedProfileId === otherUid) renderViewProfilePage();
     } catch (error) {
         showToast('Something went wrong', 'error');
     }
@@ -584,13 +600,24 @@ async function cancelConnectRequest(otherUid) {
 async function acceptConnectRequest(otherUid, displayName) {
     if (!requireAuth('Sign in to accept connection requests.')) return;
     const uid = AppState.currentUser.uid;
+    const myName = AppState.userProfile?.username || 'Anonymous';
 
     try {
         await database.ref(`users/${uid}/connections/${otherUid}`).update({ status: 'accepted' });
         await database.ref(`users/${otherUid}/connections/${uid}`).update({ status: 'accepted' });
         AppState.userConnections.set(otherUid, 'brethren');
+
+        await addNotification(otherUid, {
+            type: 'connection_accepted',
+            fromUid: uid,
+            fromName: myName,
+            message: `${myName} accepted your Brethren request — you can now message each other!`
+        });
+
         showToast(`You and ${displayName} are now Brethren!`, 'success');
-        renderViewProfilePage();
+
+        if (AppState.currentRoute === 'view-profile' && AppState.viewedProfileId === otherUid) renderViewProfilePage();
+        if (AppState.sheetOpen) showNotificationPanel();
     } catch (error) {
         showToast('Something went wrong', 'error');
     }
@@ -598,6 +625,7 @@ async function acceptConnectRequest(otherUid, displayName) {
 
 async function declineConnectRequest(otherUid) {
     await cancelConnectRequest(otherUid);
+    if (AppState.sheetOpen) showNotificationPanel();
 }
 
 function removeBrethren(otherUid, displayName) {
@@ -657,7 +685,7 @@ async function confirmBlockUser(userId) {
         closeModal();
         closeSheet();
         showToast('User blocked', 'success');
-        loadReels();
+        if (AppState.currentRoute === 'space') loadSpacePosts();
     } catch (error) {
         showToast('Failed to block user', 'error');
     }
@@ -745,6 +773,12 @@ async function loadDMConversations() {
 function openConversation(otherUid, otherUserName) {
     if (!requireAuth('Sign in to send messages.', () => openConversation(otherUid, otherUserName))) return;
 
+    if (AppState.userConnections.get(otherUid) !== 'brethren') {
+        showToast('You can only message Brethren. Send a connection request first.', 'warning');
+        viewUserProfile(otherUid, otherUserName);
+        return;
+    }
+
     AppState.currentDMUserId = otherUid;
     AppState.currentDMUserName = otherUserName;
     navigateTo('dm-thread');
@@ -753,6 +787,12 @@ function openConversation(otherUid, otherUserName) {
 async function renderDMThreadPage() {
     const otherUid = AppState.currentDMUserId;
     if (!otherUid || !AppState.currentUser) {
+        navigateTo('messages');
+        return;
+    }
+
+    if (AppState.userConnections.get(otherUid) !== 'brethren') {
+        showToast('You can only message Brethren.', 'warning');
         navigateTo('messages');
         return;
     }
@@ -828,6 +868,26 @@ function renderDMMessage(msg, uid) {
                 <div style="font-weight:600;">${escapeHtml(msg.content || 'Shared a study plan')}</div>
             </div>
         `;
+    } else if (msg.type === 'note') {
+        bodyHTML = `
+            <div class="group-msg-bible">
+                <i class="fas fa-sticky-note"></i>
+                <div>
+                    <div style="font-weight:600;">${escapeHtml(msg.reference || 'A note')}</div>
+                    <div style="font-size:13px;">${escapeHtml(msg.content || '')}</div>
+                </div>
+            </div>
+        `;
+    } else if (msg.type === 'reflection') {
+        bodyHTML = `
+            <div class="group-msg-bible">
+                <i class="fas fa-lightbulb"></i>
+                <div>
+                    <div style="font-weight:600;">Today's Reflection</div>
+                    <div style="font-size:13px;">${escapeHtml(msg.content || '')}</div>
+                </div>
+            </div>
+        `;
     } else {
         bodyHTML = `<p>${escapeHtml(msg.content || '')}</p>`;
     }
@@ -876,20 +936,31 @@ async function sendDirectMessage() {
     await deliverDMMessage({ type: 'text', content });
 }
 
+// Message types that count toward the daily Brethren streak — sharing
+// anything devotional (not just verses) keeps the streak alive.
+const STREAK_ELIGIBLE_TYPES = ['bible', 'note', 'reflection'];
+
 /**
  * Writes a message into the current DM thread and keeps both users'
  * conversation indexes (dmIndex) up to date. Used by plain text, verse,
- * and plan shares alike.
+ * plan, note, and reflection shares alike.
  */
 async function deliverDMMessage(messageFields) {
     const otherUid = AppState.currentDMUserId;
     if (!AppState.currentUser || !otherUid) return;
+
+    if (AppState.userConnections.get(otherUid) !== 'brethren') {
+        showToast('You can only message Brethren.', 'warning');
+        return;
+    }
 
     const uid = AppState.currentUser.uid;
     const conversationId = getDMConversationId(uid, otherUid);
     const myName = AppState.userProfile?.username || 'Anonymous';
     const preview = messageFields.type === 'bible' ? `📖 ${messageFields.reference || 'Shared a verse'}`
         : messageFields.type === 'plan' ? `📅 ${messageFields.content || 'Shared a study plan'}`
+        : messageFields.type === 'note' ? `📝 ${messageFields.reference || 'Shared a note'}`
+        : messageFields.type === 'reflection' ? `💡 Shared today's reflection`
         : messageFields.content;
 
     const msg = {
@@ -917,7 +988,7 @@ async function deliverDMMessage(messageFields) {
             conversationId
         });
 
-        if (messageFields.type === 'bible') {
+        if (STREAK_ELIGIBLE_TYPES.includes(messageFields.type)) {
             await updateDMStreak(conversationId, uid, otherUid);
         }
 
@@ -933,10 +1004,17 @@ function showDMAttachMenu() {
     if (!requireAuth('Sign in to share.')) return;
 
     const sheetContent = `
-        <h3 style="margin-bottom: 12px;">Share</h3>
+        <h3 style="margin-bottom: 4px;">Share</h3>
+        <p class="text-muted" style="font-size: 12px; margin-bottom: 12px;"><i class="fas fa-fire" style="color:#f57c00;"></i> Any of these keep your streak alive today.</p>
         <div style="display: grid; gap: 8px;">
             <button class="btn btn-outline btn-block" onclick="closeSheet(); shareVerseToDM();">
                 <i class="fas fa-book-bible"></i> Share Bible Verse
+            </button>
+            <button class="btn btn-outline btn-block" onclick="closeSheet(); shareNoteToDM();">
+                <i class="fas fa-sticky-note"></i> Share a Note
+            </button>
+            <button class="btn btn-outline btn-block" onclick="closeSheet(); shareReflectionToDM();">
+                <i class="fas fa-lightbulb"></i> Share Today's Reflection
             </button>
             <button class="btn btn-outline btn-block" onclick="closeSheet(); sharePlanToDM();">
                 <i class="fas fa-calendar-check"></i> Share Study Plan
@@ -974,6 +1052,40 @@ function shareVerseToDM() {
     });
 }
 
+function shareNoteToDM() {
+    if (AppState.notes.length === 0) {
+        showToast('You have no notes to share yet — add one from the Bible reader.', 'warning');
+        return;
+    }
+
+    const modalContent = `
+        <h3 style="margin-bottom: 16px;">Share a Note</h3>
+        <div style="display: grid; gap: 8px; max-height: 320px; overflow-y: auto;">
+            ${AppState.notes.map((note, i) => `
+                <button class="btn btn-outline btn-block" style="text-align:left;" onclick="submitShareNoteToDM(${i})">
+                    <div style="font-weight:600;">${escapeHtml(note.reference || 'Note')}</div>
+                    <div style="font-size:12px; color: var(--text-slate); white-space:normal;">${escapeHtml((note.text || '').slice(0, 80))}${(note.text || '').length > 80 ? '…' : ''}</div>
+                </button>
+            `).join('')}
+        </div>
+    `;
+    showModal(modalContent);
+}
+
+async function submitShareNoteToDM(noteIndex) {
+    const note = AppState.notes[noteIndex];
+    if (!note) return;
+
+    await deliverDMMessage({ type: 'note', reference: note.reference || 'Note', content: note.text || '' });
+    closeModal();
+}
+
+async function shareReflectionToDM() {
+    const reflection = AppState.todayReflection || await getDailyReflection();
+    await deliverDMMessage({ type: 'reflection', content: reflection });
+    showToast('Reflection shared', 'success');
+}
+
 function sharePlanToDM() {
     if (AppState.plannerData.length === 0) {
         showToast('You have no study plans to share yet', 'warning');
@@ -1001,10 +1113,12 @@ async function submitSharePlanToDM(planIndex) {
     closeModal();
 }
 
-/* ---- Bible-verse streaks (Snapchat-style) ----
+/* ---- Devotional streaks (Snapchat-style) ----
    A streak day is only "completed" once BOTH participants in a DM have
-   shared at least one Bible verse on that calendar date. Consecutive
-   completed days increase the streak; a missed day resets it. */
+   shared something devotional (a verse, a note, or a reflection) on that
+   calendar date. Consecutive completed days increase the streak; a missed
+   day resets it. Milestones get a little celebration to keep it fun and
+   worth coming back for. */
 function getTodayDateString() {
     return new Date().toISOString().split('T')[0];
 }
@@ -1015,14 +1129,18 @@ function getYesterdayDateString() {
     return d.toISOString().split('T')[0];
 }
 
+const STREAK_MILESTONES = [3, 7, 14, 30, 50, 100, 365];
+
 async function updateDMStreak(conversationId, uid, otherUid) {
     const streakRef = database.ref(`dmConversations/${conversationId}/streak`);
+    let previousCount = 0;
 
     try {
         const result = await streakRef.transaction(current => {
             const today = getTodayDateString();
             const yesterday = getYesterdayDateString();
             const streak = current || { count: 0, lastCompletedDate: null, activeDates: {} };
+            previousCount = streak.count || 0;
             streak.activeDates = streak.activeDates || {};
             streak.activeDates[uid] = today;
 
@@ -1030,6 +1148,7 @@ async function updateDMStreak(conversationId, uid, otherUid) {
             if (otherActiveToday && streak.lastCompletedDate !== today) {
                 streak.count = streak.lastCompletedDate === yesterday ? (streak.count || 0) + 1 : 1;
                 streak.lastCompletedDate = today;
+                streak.longest = Math.max(streak.longest || 0, streak.count);
             }
             return streak;
         });
@@ -1039,6 +1158,17 @@ async function updateDMStreak(conversationId, uid, otherUid) {
         // Denormalize into both users' conversation indexes for fast list rendering.
         await database.ref(`users/${uid}/dmIndex/${otherUid}/streak`).set(count);
         await database.ref(`users/${otherUid}/dmIndex/${uid}/streak`).set(count);
+
+        if (count > previousCount && STREAK_MILESTONES.includes(count)) {
+            const name = AppState.currentDMUserName || 'your Brethren';
+            showToast(`🔥 ${count}-day streak with ${name}! Keep it going.`, 'success');
+            await addNotification(otherUid, {
+                type: 'streak_milestone',
+                fromUid: uid,
+                fromName: AppState.userProfile?.username || 'A Brethren',
+                message: `🔥 You and ${AppState.userProfile?.username || 'a Brethren'} hit a ${count}-day streak!`
+            });
+        }
 
         return count;
     } catch (error) {
@@ -1435,6 +1565,15 @@ function renderSettingsPage() {
             
             <div class="card">
                 <h3 style="font-weight: 600; margin-bottom: 16px;">Account</h3>
+                ${AppState.currentUser && !AppState.currentUser.emailVerified ? `
+                    <div class="auth-verify-banner">
+                        <i class="fas fa-circle-exclamation" style="color: var(--accent-muted-gold);"></i>
+                        <div style="flex:1;">
+                            Your email isn't verified yet.
+                            <button class="btn btn-sm btn-outline" style="margin-left: 6px;" onclick="resendVerificationEmail()">Resend Email</button>
+                        </div>
+                    </div>
+                ` : ''}
                 <button class="btn btn-accent btn-block" onclick="handleLogout()">
                     <i class="fas fa-sign-out-alt"></i> Sign Out
                 </button>
@@ -1452,8 +1591,14 @@ async function loadNotifications() {
     try {
         const uid = AppState.currentUser.uid;
         const snapshot = await database.ref(`users/${uid}/notifications`).once('value');
-        AppState.notifications = snapshot.val() || [];
-        
+        const raw = snapshot.val() || {};
+        // Firebase push() keys aren't sequential, so this always comes back
+        // as an object — normalize it to an array, keeping each entry's key
+        // so we can mark it read individually.
+        AppState.notifications = Object.entries(raw)
+            .map(([key, value]) => ({ key, ...value }))
+            .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
         updateNotificationBadge();
     } catch (error) {
         console.error('Error loading notifications:', error);
@@ -1461,10 +1606,12 @@ async function loadNotifications() {
 }
 
 function updateNotificationBadge() {
-    const unreadCount = AppState.notifications.filter(n => !n.read).length;
+    const unreadNotifs = AppState.notifications.filter(n => !n.read).length;
+    const pendingRequests = Array.from(AppState.userConnections.values()).filter(s => s === 'pending_received').length;
+    const unreadCount = unreadNotifs + pendingRequests;
     if (unreadCount > 0) {
         DOM.notifBadge.classList.remove('hidden');
-        DOM.notifBadge.textContent = unreadCount;
+        DOM.notifBadge.textContent = unreadCount > 99 ? '99+' : unreadCount;
     } else {
         DOM.notifBadge.classList.add('hidden');
     }
@@ -1520,6 +1667,12 @@ function initEventListeners() {
         showNotificationPanel();
     });
 
+    // Space "add post" button lives in the top bar (only visible on the
+    // Space route — see navigateTo()).
+    if (DOM.spaceAddBtn) {
+        DOM.spaceAddBtn.addEventListener('click', () => showCreateSpacePostModal());
+    }
+
     // Profile / avatar button in top bar
     DOM.profileNavBtn.addEventListener('click', handleProfileNavClick);
     
@@ -1573,40 +1726,76 @@ function initEventListeners() {
     });
 }
 
-function showNotificationPanel() {
+async function showNotificationPanel() {
     if (!requireAuth('Sign in to view notifications.')) return;
-    
+
+    // Pull pending incoming connection requests straight from the
+    // connections node (source of truth) rather than relying on the
+    // notification log, so Accept/Decline is always accurate even if a
+    // notification was missed or already cleared.
+    const uid = AppState.currentUser.uid;
+    let pendingRequests = [];
+    try {
+        const snapshot = await database.ref(`users/${uid}/connections`).once('value');
+        const connections = snapshot.val() || {};
+        pendingRequests = Object.entries(connections)
+            .filter(([, info]) => info && info.status === 'pending' && info.direction === 'incoming')
+            .map(([otherUid, info]) => ({ otherUid, name: info.name || 'A GraceGuide member', timestamp: info.timestamp || 0 }))
+            .sort((a, b) => b.timestamp - a.timestamp);
+    } catch (error) {
+        console.error('Error loading connection requests:', error);
+    }
+
+    const requestsHTML = pendingRequests.length > 0 ? `
+        <h4 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-slate); margin-bottom: 8px;">Brethren Requests</h4>
+        <div style="display:flex; flex-direction:column; gap:8px; margin-bottom: 20px;">
+            ${pendingRequests.map(req => `
+                <div class="notif-request-row">
+                    <div class="post-avatar comment-avatar" style="width:40px;height:40px; cursor:pointer;" onclick="viewUserProfile('${req.otherUid}', '${escapeHtml(req.name).replace(/'/g, "\\'")}')">
+                        ${escapeHtml(req.name)[0]?.toUpperCase() || 'U'}
+                    </div>
+                    <div style="flex:1; min-width:0;">
+                        <div style="font-weight:600;">${escapeHtml(req.name)}</div>
+                        <div style="font-size:12px; color: var(--text-slate);">wants to connect as Brethren</div>
+                    </div>
+                    <div style="display:flex; gap:6px;">
+                        <button class="btn btn-primary btn-sm" onclick="acceptConnectRequest('${req.otherUid}', '${escapeHtml(req.name).replace(/'/g, "\\'")}')"><i class="fas fa-check"></i></button>
+                        <button class="btn btn-outline btn-sm" onclick="declineConnectRequest('${req.otherUid}')"><i class="fas fa-xmark"></i></button>
+                    </div>
+                </div>
+            `).join('')}
+        </div>
+    ` : '';
+
+    const generalNotifs = AppState.notifications.filter(n => n.type !== 'connection_request');
+
     const sheetContent = `
         <h3 style="margin-bottom: 16px;">Notifications</h3>
-        ${AppState.notifications.length > 0 ? `
-            ${AppState.notifications.slice(-10).reverse().map(notif => `
-                <div class="p-2" style="border-bottom: 1px solid rgba(0,0,0,0.06);">
+        ${requestsHTML}
+        ${generalNotifs.length > 0 ? `
+            ${pendingRequests.length > 0 ? `<h4 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-slate); margin-bottom: 8px;">Recent</h4>` : ''}
+            ${generalNotifs.slice(-15).reverse().map(notif => `
+                <div class="p-2" style="border-bottom: 1px solid rgba(0,0,0,0.06); cursor:${notif.fromUid ? 'pointer' : 'default'};" ${notif.fromUid ? `onclick="viewUserProfile('${notif.fromUid}', '${escapeHtml(notif.fromName || 'User').replace(/'/g, "\\'")}')"` : ''}>
                     <div style="font-weight: ${notif.read ? '400' : '600'};">${escapeHtml(notif.message)}</div>
                     <div style="font-size: 12px; color: var(--text-slate);">${formatDate(notif.timestamp)}</div>
                 </div>
             `).join('')}
-        ` : `
-            <p class="text-center text-muted">No notifications</p>
-        `}
+        ` : (pendingRequests.length === 0 ? `<p class="text-center text-muted">No notifications</p>` : '')}
     `;
-    
+
     showSheet(sheetContent);
-    
-    // Mark all as read
-    if (AppState.currentUser && AppState.notifications.length > 0) {
-        const uid = AppState.currentUser.uid;
-        database.ref(`users/${uid}/notifications`).once('value')
-            .then(snapshot => {
-                const notifications = snapshot.val();
-                if (notifications) {
-                    Object.keys(notifications).forEach(key => {
-                        notifications[key].read = true;
-                    });
-                    database.ref(`users/${uid}/notifications`).set(notifications);
-                    AppState.notifications = Object.values(notifications);
-                    updateNotificationBadge();
-                }
-            });
+
+    // Mark all general notifications as read (connection requests are
+    // handled separately via Accept/Decline, not "read" status).
+    if (generalNotifs.some(n => !n.read)) {
+        const updates = {};
+        generalNotifs.forEach(n => { if (!n.read && n.key) updates[`${n.key}/read`] = true; });
+        if (Object.keys(updates).length > 0) {
+            database.ref(`users/${uid}/notifications`).update(updates).then(() => {
+                AppState.notifications = AppState.notifications.map(n => ({ ...n, read: true }));
+                updateNotificationBadge();
+            }).catch(error => console.error('Error marking notifications read:', error));
+        }
     }
 }
 
@@ -1656,15 +1845,22 @@ window.showAuthModal = showAuthModal;
 window.requireAuth = requireAuth;
 window.handleProfileNavClick = handleProfileNavClick;
 window.triggerAvatarUpload = triggerAvatarUpload;
-window.postSelectedVersesAsReel = postSelectedVersesAsReel;
-window.showCreateReelModal = showCreateReelModal;
-window.loveReel = loveReel;
-window.showReelComments = showReelComments;
-window.submitReelComment = submitReelComment;
-window.shareReel = shareReel;
+window.postSelectedVersesToSpace = postSelectedVersesToSpace;
+window.showCreateSpacePostModal = showCreateSpacePostModal;
+window.showSpacePostComposer = showSpacePostComposer;
+window.submitTextSpacePost = submitTextSpacePost;
+window.submitVideoSpacePost = submitVideoSpacePost;
+window.submitNoteSpacePost = submitNoteSpacePost;
+window.submitPlanSpacePost = submitPlanSpacePost;
+window.toggleSpaceAmen = toggleSpaceAmen;
+window.toggleSpaceSave = toggleSpaceSave;
+window.showSpacePostComments = showSpacePostComments;
+window.submitSpacePostComment = submitSpacePostComment;
+window.shareSpacePost = shareSpacePost;
 window.submitShareReelToGroup = submitShareReelToGroup;
-window.deleteReel = deleteReel;
-window.confirmDeleteReel = confirmDeleteReel;
+window.deleteSpacePost = deleteSpacePost;
+window.confirmDeleteSpacePost = confirmDeleteSpacePost;
+window.scrollSpaceCarousel = scrollSpaceCarousel;
 window.showCreateGroupModal = showCreateGroupModal;
 window.openGroup = openGroup;
 window.showGroupMembers = showGroupMembers;
@@ -1707,3 +1903,4 @@ window.toggleTheme = toggleTheme;
 window.closeModal = closeModal;
 window.closeSheet = closeSheet;
 window.handleLogout = handleLogout;
+window.resendVerificationEmail = resendVerificationEmail;

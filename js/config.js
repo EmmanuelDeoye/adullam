@@ -33,14 +33,20 @@ const DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions";
 
 
 // Shepherd Voice (Text-to-Speech) Configuration
-// ⚠️ REPLACE WITH YOUR AZURE SPEECH RESOURCE KEY + REGION to enable natural,
-// non-robotic Neural voices — including two genuine Nigerian-accented voices
-// (en-NG-AbeoNeural / en-NG-EzinneNeural). Get a key at https://portal.azure.com
-// (Speech service, free tier available). Without a key, Shepherd automatically
-// falls back to the device's built-in browser voices, which sound more robotic
-// and won't have a Nigerian accent.
-const AZURE_SPEECH_KEY = "YOUR_AZURE_SPEECH_KEY";
-const AZURE_SPEECH_REGION = "eastus";
+// Uses the browser's built-in, free Web Speech API (SpeechSynthesis) — no
+// API key or paid service required. Voice quality depends on the device,
+// but every modern browser ships at least one male and one female voice.
+
+// Bible API (scripture.api.bible) Configuration
+const BIBLE_API_KEY = "In0fpKKWPFAQj_Kjidnv";
+const BIBLE_API_BASE = "https://api.scripture.api.bible/v1";
+// Bible IDs on api.bible for the supported translations
+const BIBLE_VERSIONS = {
+  KJV: "de4e12af7f28f599-02",
+  NLT: "71c6eab17ae5b667-01",
+  MSG: "65eec8e0b60e656b-01",
+  AMP: "1588df8288f6c99b-01"
+};
 // Initialize Firebase
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();

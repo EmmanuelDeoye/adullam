@@ -2,8 +2,164 @@
    GraceGuide — js/features.js
    Load AFTER config.js and core.js.
    Contains: Shepherd AI chat, conversation history,
-   the Bible reading planner, and Reels.
+   the Bible reading planner, personalization engine, and Space.
    ============================================ */
+
+/* ============================================
+   PERSONALIZATION ENGINE
+   ============================================
+   A lightweight, on-device "interest profile" built from what the user
+   actually does in the app — books they read, topics they ask Shepherd
+   about, and Space posts they engage with. Nothing here calls an external
+   ML service; it's simple, transparent weighted-keyword scoring, which
+   keeps it fast, free, and easy to reason about. The same profile powers
+   both the Space feed ranking and the homepage "Recommended for You" list. */
+
+const TOPIC_KEYWORDS = {
+    faith: ['faith', 'believe', 'trust god', 'doubt'],
+    fear: ['fear', 'afraid', 'anxious', 'anxiety', 'worry', 'worried'],
+    peace: ['peace', 'calm', 'rest', 'anxiety'],
+    love: ['love', 'relationship', 'marriage', 'spouse'],
+    hope: ['hope', 'future', 'discourage', 'despair'],
+    wisdom: ['wisdom', 'guidance', 'decision', 'direction'],
+    strength: ['strength', 'strong', 'weak', 'tired', 'burnout', 'exhausted'],
+    forgiveness: ['forgive', 'forgiveness', 'grudge', 'bitterness'],
+    prayer: ['pray', 'prayer', 'praying'],
+    grace: ['grace', 'mercy', 'shame', 'guilt'],
+    patience: ['patience', 'patient', 'waiting'],
+    joy: ['joy', 'happy', 'happiness', 'gratitude', 'thankful'],
+    purpose: ['purpose', 'calling', 'career', 'work'],
+    grief: ['grief', 'loss', 'death', 'mourning', 'sad'],
+    family: ['family', 'parent', 'children', 'kids']
+};
+
+// A small curated pool of passages per topic, used to build personalized
+// homepage recommendations without needing a server-side content index.
+const TOPIC_PASSAGES = {
+    faith: { book: 'Hebrews', chapter: 11, title: 'The Faith Chapter', duration: 9 },
+    fear: { book: 'Philippians', chapter: 4, title: "Don't Be Anxious", duration: 6 },
+    peace: { book: 'John', chapter: 14, title: 'Peace I Leave With You', duration: 6 },
+    love: { book: '1 Corinthians', chapter: 13, title: 'The Way of Love', duration: 4 },
+    hope: { book: 'Romans', chapter: 15, title: 'The God of Hope', duration: 7 },
+    wisdom: { book: 'James', chapter: 1, title: 'Wisdom That Comes from Above', duration: 6 },
+    strength: { book: 'Isaiah', chapter: 40, title: 'Those Who Wait Will Renew Their Strength', duration: 8 },
+    forgiveness: { book: 'Colossians', chapter: 3, title: 'Bearing With One Another', duration: 6 },
+    prayer: { book: 'Matthew', chapter: 6, title: 'The Lord\'s Prayer', duration: 7 },
+    grace: { book: 'Ephesians', chapter: 2, title: 'Saved by Grace', duration: 6 },
+    patience: { book: 'James', chapter: 5, title: 'Patience in Suffering', duration: 5 },
+    joy: { book: 'Nehemiah', chapter: 8, title: 'The Joy of the Lord', duration: 8 },
+    purpose: { book: 'Jeremiah', chapter: 29, title: 'Plans to Prosper You', duration: 5 },
+    grief: { book: 'Psalm', chapter: 34, title: 'Close to the Brokenhearted', duration: 4 },
+    family: { book: 'Ephesians', chapter: 6, title: 'Instructions for Households', duration: 6 }
+};
+
+function extractTags(text) {
+    if (!text) return [];
+    const lower = text.toLowerCase();
+    return Object.keys(TOPIC_KEYWORDS).filter(topic => TOPIC_KEYWORDS[topic].some(kw => lower.includes(kw)));
+}
+
+function getInterestProfile() {
+    if (!AppState.interestProfile) {
+        AppState.interestProfile = { books: {}, tags: {}, updatedAt: Date.now() };
+    }
+    return AppState.interestProfile;
+}
+
+let interestSaveTimer = null;
+function persistInterestProfileSoon() {
+    // Debounced write — interest signals fire often (every message, every
+    // scroll-triggered like), so batch them into occasional saves instead
+    // of hammering the database.
+    clearTimeout(interestSaveTimer);
+    interestSaveTimer = setTimeout(() => {
+        if (!AppState.currentUser) {
+            localStorage.setItem('graceguide_interest_profile', JSON.stringify(AppState.interestProfile));
+            return;
+        }
+        database.ref(`users/${AppState.currentUser.uid}/interestProfile`).set(AppState.interestProfile).catch(() => {});
+    }, 2500);
+}
+
+/**
+ * Records a single interest signal. category is 'book' or 'tag';
+ * weight reflects how strong the signal is (a view is weak, creating
+ * content is strong).
+ */
+function recordInterestSignal(category, key, weight) {
+    if (!key) return;
+    const profile = getInterestProfile();
+    const bucket = category === 'book' ? profile.books : profile.tags;
+    bucket[key] = (bucket[key] || 0) + weight;
+    profile.updatedAt = Date.now();
+    persistInterestProfileSoon();
+}
+
+async function loadInterestProfile() {
+    try {
+        if (AppState.currentUser) {
+            const snapshot = await database.ref(`users/${AppState.currentUser.uid}/interestProfile`).once('value');
+            AppState.interestProfile = snapshot.val() || { books: {}, tags: {}, updatedAt: Date.now() };
+        } else {
+            const local = localStorage.getItem('graceguide_interest_profile');
+            AppState.interestProfile = local ? JSON.parse(local) : { books: {}, tags: {}, updatedAt: Date.now() };
+        }
+    } catch (error) {
+        console.error('Error loading interest profile:', error);
+        AppState.interestProfile = { books: {}, tags: {}, updatedAt: Date.now() };
+    }
+}
+
+/** Scores a piece of content (a Space post or a passage) against the
+ * user's interest profile: tag/book affinity + a mild recency boost +
+ * a small popularity nudge, so the feed favors what a user cares about
+ * without becoming an total echo chamber of only-old-favorites. */
+function scoreForInterest(tags, book, timestamp, engagementCount) {
+    const profile = getInterestProfile();
+    let score = 0;
+
+    (tags || []).forEach(tag => { score += (profile.tags[tag] || 0); });
+    if (book && profile.books[book]) score += profile.books[book] * 0.6;
+
+    if (timestamp) {
+        const ageHours = (Date.now() - timestamp) / 36e5;
+        score += Math.max(0, 6 - Math.log2(ageHours + 1)); // fresher content nudged up
+    }
+    if (engagementCount) score += Math.log2(engagementCount + 1) * 0.5;
+
+    return score;
+}
+
+function getPersonalizedRecommendations() {
+    const profile = getInterestProfile();
+    const topTagEntries = Object.entries(profile.tags).sort((a, b) => b[1] - a[1]);
+
+    const picks = [];
+    const usedBooks = new Set();
+
+    for (const [tag] of topTagEntries) {
+        const passage = TOPIC_PASSAGES[tag];
+        if (passage && !usedBooks.has(passage.book + passage.chapter)) {
+            picks.push({ ...passage, reference: `${passage.book} ${passage.chapter}` });
+            usedBooks.add(passage.book + passage.chapter);
+        }
+        if (picks.length >= 4) break;
+    }
+
+    // Cold start / not enough signal yet — fall back to well-loved defaults.
+    const defaults = [
+        { book: 'Matthew', chapter: 5, title: 'The Beatitudes', reference: 'Matthew 5', duration: 5 },
+        { book: 'Psalm', chapter: 23, title: 'The Lord is My Shepherd', reference: 'Psalm 23', duration: 3 },
+        { book: 'Romans', chapter: 8, title: 'Life in the Spirit', reference: 'Romans 8', duration: 8 },
+        { book: 'Proverbs', chapter: 3, title: 'Trust in the Lord', reference: 'Proverbs 3', duration: 5 }
+    ];
+    for (const d of defaults) {
+        if (picks.length >= 4) break;
+        if (!usedBooks.has(d.book + d.chapter)) { picks.push(d); usedBooks.add(d.book + d.chapter); }
+    }
+
+    return picks.slice(0, 4);
+}
 
 /* ============================================
    SHEPHERD (ASK AI) PAGE
@@ -99,7 +255,7 @@ function renderChatHistory() {
                 <div class="chat-message-toolbar">
                     <button class="icon-btn" onclick="copyMessageText(${index})" aria-label="Copy"><i class="fas fa-copy"></i></button>
                     <button class="icon-btn" onclick="shareMessageText(${index})" aria-label="Share"><i class="fas fa-share-nodes"></i></button>
-                    <button class="icon-btn" onclick="postMessageToReels(${index})" aria-label="Post to Reels"><i class="fas fa-bullhorn"></i></button>
+                    <button class="icon-btn" onclick="postMessageToReels(${index})" aria-label="Post to Space"><i class="fas fa-bullhorn"></i></button>
                 </div>
             ` : ''}
         </div>
@@ -142,21 +298,18 @@ async function postMessageToReels(index) {
     const msg = AppState.aiChatHistory[index];
     if (!msg) return;
 
-    const reel = {
-        id: generateId(),
-        authorId: AppState.currentUser.uid,
-        authorName: AppState.userProfile?.username || 'Anonymous',
-        type: 'text',
-        textContent: msg.content,
-        timestamp: Date.now(),
-        likes: {},
-        comments: {}
-    };
+    const post = buildSpacePostObject({
+        type: 'shepherd',
+        slides: splitTextIntoSlides(msg.content, 'Shepherd says'),
+        tags: extractTags(msg.content)
+    });
 
     try {
-        await database.ref(`reels/${reel.id}`).set(reel);
-        showToast('Posted to Reels!', 'success');
-        navigateTo('reels');
+        await database.ref(`spacePosts/${post.id}`).set(post);
+        recordInterestSignal('tag', 'own_post', 2.5);
+        (post.tags || []).forEach(tag => recordInterestSignal('tag', tag, 2.5));
+        showToast('Posted to Space!', 'success');
+        navigateTo('space');
     } catch (error) {
         showToast('Failed to post', 'error');
         console.error(error);
@@ -226,6 +379,9 @@ async function sendChatMessage(override) {
         content: displayText,
         timestamp: Date.now()
     });
+
+    // Feed the personalization engine — what topics is the user asking about?
+    extractTags(apiText).forEach(tag => recordInterestSignal('tag', tag, 1.5));
     
     renderChatHistory();
     scrollChatToBottom();
@@ -361,7 +517,7 @@ async function callDeepSeekAI(message) {
 
 Formatting rules: Write in plain, natural sentences and short paragraphs. Do not use markdown symbols like **, ##, or bullet dashes, and do not use em dashes. If a list genuinely helps, write it as short plain sentences separated by line breaks instead of using markdown list syntax.
 
-Action rule: If, and only if, the user is clearly asking you to DO something the app can perform for them (create a study plan, post a verse or share something to Reels, open a specific Bible passage, or save a note/prayer list as a downloadable file), end your reply with exactly one line in this exact machine-readable format and nothing after it:
+Action rule: If, and only if, the user is clearly asking you to DO something the app can perform for them (create a study plan, post a verse or share something to Space, open a specific Bible passage, or save a note/prayer list as a downloadable file), end your reply with exactly one line in this exact machine-readable format and nothing after it:
 §ACTION§{"type":"create_plan|create_post|open_bible|download_file","label":"short button label","data":{...}}
 For create_plan, data may include planType, duration (days), description.
 For create_post, data may include content, reference, embedUrl.
@@ -504,24 +660,20 @@ function stripMarkdownForSpeech(raw) {
 /* ============================================
    VOICE (Text-to-Speech for Shepherd's replies)
    ============================================ */
-// Curated Shepherd voices. The first two are genuine Azure Neural voices
-// with a Nigerian accent; the other two round out the set to 2 male + 2
-// female. These only work once AZURE_SPEECH_KEY is configured in config.js —
-// otherwise Shepherd falls back to whatever voices the device provides.
+// Uses only the browser's free, built-in Web Speech API (SpeechSynthesis) —
+// no paid/cloud service or API key required. Personas are matched to
+// on-device voices by gender/name hints at speak-time, so the exact voice
+// heard can vary by browser/OS, but the set always includes at least one
+// male and one female option.
 const SHEPHERD_VOICES = [
-    { id: 'abeo', label: 'Abeo', gender: 'Male', accent: 'Nigerian', azureVoice: 'en-NG-AbeoNeural' },
-    { id: 'ezinne', label: 'Ezinne', gender: 'Female', accent: 'Nigerian', azureVoice: 'en-NG-EzinneNeural' },
-    { id: 'david', label: 'David', gender: 'Male', accent: 'American', azureVoice: 'en-US-GuyNeural' },
-    { id: 'aria', label: 'Aria', gender: 'Female', accent: 'American', azureVoice: 'en-US-AriaNeural' }
+    { id: 'david', label: 'David', gender: 'Male', description: 'Warm, steady male voice' },
+    { id: 'aria', label: 'Aria', gender: 'Female', description: 'Warm, steady female voice' },
+    { id: 'daniel', label: 'Daniel', gender: 'Male', description: 'Calm, measured male voice' },
+    { id: 'grace', label: 'Grace', gender: 'Female', description: 'Gentle, encouraging female voice' }
 ];
 
 let availableVoices = [];
 let currentSpeakingIndex = null;
-let ttsAudioEl = null;
-
-function isCloudVoiceConfigured() {
-    return !!AZURE_SPEECH_KEY && AZURE_SPEECH_KEY !== 'YOUR_AZURE_SPEECH_KEY';
-}
 
 function getSelectedVoiceOption() {
     const savedId = localStorage.getItem('graceguide_voice_id');
@@ -531,7 +683,6 @@ function getSelectedVoiceOption() {
 function initVoices() {
     AppState.selectedVoiceId = localStorage.getItem('graceguide_voice_id') || SHEPHERD_VOICES[0].id;
 
-    // Keep a pool of on-device voices as a fallback for when Azure isn't configured.
     if (window.speechSynthesis) {
         const loadBrowserVoices = () => { availableVoices = window.speechSynthesis.getVoices() || []; };
         loadBrowserVoices();
@@ -539,42 +690,16 @@ function initVoices() {
     }
 }
 
-function getTTSAudioElement() {
-    if (!ttsAudioEl) ttsAudioEl = new Audio();
-    return ttsAudioEl;
-}
-
-function buildSSML(text, azureVoiceName) {
-    const escaped = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    return `<speak version="1.0" xml:lang="en-US"><voice name="${azureVoiceName}"><prosody rate="-4%" pitch="0%">${escaped}</prosody></voice></speak>`;
-}
-
-async function synthesizeAzureSpeech(text, azureVoiceName) {
-    const url = `https://${AZURE_SPEECH_REGION}.tts.speech.microsoft.com/cognitiveservices/v1`;
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-            'Ocp-Apim-Subscription-Key': AZURE_SPEECH_KEY,
-            'Content-Type': 'application/ssml+xml',
-            'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3'
-        },
-        body: buildSSML(text, azureVoiceName)
-    });
-
-    if (!response.ok) throw new Error('Azure Speech request failed');
-    const blob = await response.blob();
-    return URL.createObjectURL(blob);
-}
-
-// Rough heuristic so the on-device fallback at least leans toward the
-// gender of the persona the user picked (accent isn't controllable here).
+// Picks the best available on-device voice for a persona's gender. Falls
+// back gracefully so a male voice is always available if the device has
+// one at all — same for female.
 function pickBrowserVoiceForGender(gender) {
     if (availableVoices.length === 0) return null;
     const englishVoices = availableVoices.filter(v => v.lang?.toLowerCase().startsWith('en'));
     const pool = englishVoices.length ? englishVoices : availableVoices;
 
-    const femaleHints = ['female', 'samantha', 'victoria', 'aria', 'jenny', 'zira', 'susan', 'karen', 'moira'];
-    const maleHints = ['male', 'david', 'guy', 'daniel', 'alex', 'fred', 'george', 'mark'];
+    const femaleHints = ['female', 'samantha', 'victoria', 'aria', 'jenny', 'zira', 'susan', 'karen', 'moira', 'grace', 'fiona'];
+    const maleHints = ['male', 'david', 'guy', 'daniel', 'alex', 'fred', 'george', 'mark', 'james'];
     const hints = gender === 'Male' ? maleHints : femaleHints;
 
     const match = pool.find(v => hints.some(h => v.name.toLowerCase().includes(h)));
@@ -583,10 +708,6 @@ function pickBrowserVoiceForGender(gender) {
 
 function stopSpeaking() {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
-    if (ttsAudioEl) {
-        ttsAudioEl.pause();
-        ttsAudioEl.currentTime = 0;
-    }
     if (currentSpeakingIndex !== null) {
         const btn = document.getElementById(`listen-btn-${currentSpeakingIndex}`);
         if (btn) btn.classList.remove('speaking');
@@ -607,6 +728,11 @@ async function toggleSpeakMessage(index) {
     const text = stripMarkdownForSpeech(msg.content);
     if (!text) return;
 
+    if (!window.speechSynthesis) {
+        showToast('Voice playback is not supported on this device', 'warning');
+        return;
+    }
+
     const voice = getSelectedVoiceOption();
     const btn = document.getElementById(`listen-btn-${index}`);
 
@@ -619,28 +745,14 @@ async function toggleSpeakMessage(index) {
     };
 
     try {
-        if (isCloudVoiceConfigured()) {
-            const audioUrl = await synthesizeAzureSpeech(text, voice.azureVoice);
-            const audio = getTTSAudioElement();
-            audio.src = audioUrl;
-            audio.onended = onDone;
-            audio.onerror = onDone;
-            await audio.play();
-        } else {
-            if (!window.speechSynthesis) {
-                showToast('Voice playback is not supported on this device', 'warning');
-                onDone();
-                return;
-            }
-            const utterance = new SpeechSynthesisUtterance(text);
-            const browserVoice = pickBrowserVoiceForGender(voice.gender);
-            if (browserVoice) utterance.voice = browserVoice;
-            utterance.rate = 0.96;
-            utterance.pitch = voice.gender === 'Male' ? 0.9 : 1.05;
-            utterance.onend = onDone;
-            utterance.onerror = onDone;
-            window.speechSynthesis.speak(utterance);
-        }
+        const utterance = new SpeechSynthesisUtterance(text);
+        const browserVoice = pickBrowserVoiceForGender(voice.gender);
+        if (browserVoice) utterance.voice = browserVoice;
+        utterance.rate = 0.96;
+        utterance.pitch = voice.gender === 'Male' ? 0.9 : 1.05;
+        utterance.onend = onDone;
+        utterance.onerror = onDone;
+        window.speechSynthesis.speak(utterance);
     } catch (error) {
         console.error('TTS error:', error);
         showToast('Voice playback failed', 'error');
@@ -652,8 +764,8 @@ function showVoicePickerSheet() {
     const renderVoiceList = () => SHEPHERD_VOICES.map(v => `
         <div class="voice-option ${v.id === getSelectedVoiceOption().id ? 'active' : ''}" data-voice-id="${v.id}">
             <div class="voice-option-info" onclick="selectVoice('${v.id}')">
-                <div class="voice-option-name">${v.label} <span style="font-weight:400; color: var(--text-slate);">— ${v.gender}, ${v.accent}${v.accent === 'Nigerian' ? ' 🇳🇬' : ''}</span></div>
-                <div class="voice-option-lang">${isCloudVoiceConfigured() ? 'Natural neural voice' : 'On-device fallback (configure Azure Speech for the full voice)'}</div>
+                <div class="voice-option-name">${v.label} <span style="font-weight:400; color: var(--text-slate);">— ${v.gender}</span></div>
+                <div class="voice-option-lang">${v.description}</div>
             </div>
             <button class="icon-btn" onclick="previewVoice('${v.id}')" aria-label="Preview voice">
                 <i class="fas fa-play"></i>
@@ -664,7 +776,7 @@ function showVoicePickerSheet() {
 
     showSheet(`
         <h3 style="margin-bottom: 4px;">Shepherd's Voice</h3>
-        <p class="text-muted" style="font-size: 13px; margin-bottom: 16px;">Choose how AI replies sound when read aloud.</p>
+        <p class="text-muted" style="font-size: 13px; margin-bottom: 16px;">Choose how AI replies sound when read aloud. Voices use your device's built-in speech engine and are always free.</p>
         <div id="voice-options-list">${renderVoiceList()}</div>
     `);
 }
@@ -685,22 +797,20 @@ async function previewVoice(voiceId) {
     const voice = SHEPHERD_VOICES.find(v => v.id === voiceId);
     if (!voice) return;
 
+    if (!window.speechSynthesis) {
+        showToast('Voice playback is not supported on this device', 'warning');
+        return;
+    }
+
     const sampleText = "Peace be with you. This is how I'll sound.";
 
     try {
-        if (isCloudVoiceConfigured()) {
-            const audioUrl = await synthesizeAzureSpeech(sampleText, voice.azureVoice);
-            const audio = getTTSAudioElement();
-            audio.src = audioUrl;
-            await audio.play();
-        } else if (window.speechSynthesis) {
-            const utterance = new SpeechSynthesisUtterance(sampleText);
-            const browserVoice = pickBrowserVoiceForGender(voice.gender);
-            if (browserVoice) utterance.voice = browserVoice;
-            utterance.rate = 0.96;
-            utterance.pitch = voice.gender === 'Male' ? 0.9 : 1.05;
-            window.speechSynthesis.speak(utterance);
-        }
+        const utterance = new SpeechSynthesisUtterance(sampleText);
+        const browserVoice = pickBrowserVoiceForGender(voice.gender);
+        if (browserVoice) utterance.voice = browserVoice;
+        utterance.rate = 0.96;
+        utterance.pitch = voice.gender === 'Male' ? 0.9 : 1.05;
+        window.speechSynthesis.speak(utterance);
     } catch (error) {
         console.error('Voice preview error:', error);
         showToast('Could not preview this voice', 'error');
@@ -786,22 +896,29 @@ async function executeAIAction(actionId) {
                     break;
                 }
                 const data = action.data || {};
-                const reel = {
-                    id: generateId(),
-                    authorId: AppState.currentUser.uid,
-                    authorName: AppState.userProfile?.username || 'Anonymous',
-                    type: data.reference ? 'verses' : (data.embedUrl ? 'video' : 'text'),
-                    textContent: !data.reference && !data.embedUrl ? (data.content || action.label || '') : null,
-                    verses: data.reference ? [{ reference: data.reference, text: data.content || '' }] : null,
-                    videoUrl: data.embedUrl || null,
-                    timestamp: Date.now(),
-                    likes: {},
-                    comments: {}
-                };
+                let slides;
+                let type;
+                if (data.reference) {
+                    type = 'verses';
+                    slides = [{ kind: 'verse', reference: data.reference, text: data.content || '' }];
+                } else if (data.embedUrl) {
+                    type = 'video';
+                    slides = [];
+                } else {
+                    type = 'shepherd';
+                    slides = splitTextIntoSlides(data.content || action.label || '', 'Shepherd says');
+                }
 
-                await database.ref(`reels/${reel.id}`).set(reel);
-                showToast('Posted!', 'success');
-                navigateTo('reels');
+                const post = buildSpacePostObject({
+                    type,
+                    slides,
+                    videoUrl: data.embedUrl || null,
+                    tags: extractTags(data.content || action.label || '')
+                });
+
+                await database.ref(`spacePosts/${post.id}`).set(post);
+                showToast('Posted to Space!', 'success');
+                navigateTo('space');
                 break;
             }
             case 'open_bible': {
@@ -1517,133 +1634,272 @@ function togglePlannerDay(date) {
     }
 }
 
+
 /* ============================================
-   REELS (formerly community posts)
+   SPACE — post & discover verses, study plans, notes,
+   and Shepherd reflections. Replaces the old TikTok-style
+   "Reels" feed from before with a calmer, carousel-friendly feed built
+   for daily habit-forming engagement (streaks, saves, Amens).
    ============================================ */
-async function renderReelsPage() {
-    DOM.pageContainer.innerHTML = `
-        <div class="reels-container" id="reels-container">
-            <div class="reel-slide reel-empty-slide">
-                <div class="skeleton" style="width: 80%; height: 60%; border-radius: 16px;"></div>
-            </div>
-        </div>
-        <button class="reel-fab" id="new-reel-btn" aria-label="New reel">
-            <i class="fas fa-plus"></i>
-        </button>
-    `;
 
-    $('#new-reel-btn').addEventListener('click', () => showCreateReelModal());
+/* ---- Content helpers ---- */
 
-    await loadReels();
+// Breaks a long piece of text (e.g. a Shepherd reply) into carousel
+// slides of readable length, breaking on sentence boundaries so no
+// sentence is ever cut mid-word.
+function splitTextIntoSlides(text, label) {
+    const clean = (text || '').trim();
+    if (!clean) return [{ kind: 'text', label, text: '' }];
+
+    const MAX_CHARS = 260;
+    if (clean.length <= MAX_CHARS) return [{ kind: 'text', label, text: clean }];
+
+    const sentences = clean.match(/[^.!?]+[.!?]+(\s+|$)|[^.!?]+$/g) || [clean];
+    const slides = [];
+    let current = '';
+
+    sentences.forEach(sentence => {
+        if ((current + sentence).length > MAX_CHARS && current) {
+            slides.push(current.trim());
+            current = sentence;
+        } else {
+            current += sentence;
+        }
+    });
+    if (current.trim()) slides.push(current.trim());
+
+    return slides.map((s, i) => ({ kind: 'text', label: slides.length > 1 ? `${label} (${i + 1}/${slides.length})` : label, text: s }));
 }
 
-async function loadReels() {
-    const container = $('#reels-container');
+function buildSpacePostObject(fields) {
+    return {
+        id: generateId(),
+        authorId: AppState.currentUser.uid,
+        authorName: AppState.userProfile?.username || 'Anonymous',
+        timestamp: Date.now(),
+        type: fields.type,
+        slides: fields.slides || [],
+        sourceBook: fields.sourceBook || null,
+        sourceChapter: fields.sourceChapter || null,
+        videoUrl: fields.videoUrl || null,
+        planName: fields.planName || null,
+        tags: fields.tags || [],
+        amens: {},
+        saves: {},
+        comments: {}
+    };
+}
+
+/* ---- Daily posting streak (Snapchat-style, but with yourself/community) ----
+   Posting to Space on consecutive calendar days builds a personal streak —
+   a light, fun nudge to keep coming back, shown right at the top of the
+   feed with a flame counter. */
+async function loadSpaceStreak() {
+    if (!AppState.currentUser) { AppState.spaceStreak = { count: 0, lastPostDate: null }; return; }
+    try {
+        const snapshot = await database.ref(`users/${AppState.currentUser.uid}/spaceStreak`).once('value');
+        AppState.spaceStreak = snapshot.val() || { count: 0, lastPostDate: null };
+    } catch (error) {
+        AppState.spaceStreak = { count: 0, lastPostDate: null };
+    }
+}
+
+async function bumpSpaceStreak() {
+    if (!AppState.currentUser) return;
+    const today = getTodayDateString();
+    const yesterday = getYesterdayDateString();
+    const streak = AppState.spaceStreak || { count: 0, lastPostDate: null };
+
+    if (streak.lastPostDate === today) return; // already posted today
+
+    streak.count = streak.lastPostDate === yesterday ? (streak.count || 0) + 1 : 1;
+    streak.lastPostDate = today;
+    AppState.spaceStreak = streak;
+
+    try {
+        await database.ref(`users/${AppState.currentUser.uid}/spaceStreak`).set(streak);
+    } catch (error) { /* non-critical */ }
+
+    if (STREAK_MILESTONES.includes(streak.count)) {
+        showToast(`🔥 ${streak.count}-day Space streak! You're on a roll.`, 'success');
+    }
+}
+
+function renderSpaceStreakBanner() {
+    if (!AppState.currentUser) return '';
+    const streak = AppState.spaceStreak || { count: 0, lastPostDate: null };
+    const postedToday = streak.lastPostDate === getTodayDateString();
+
+    return `
+        <div class="space-streak-banner ${postedToday ? 'done' : ''}">
+            <div class="space-streak-flame"><i class="fas fa-fire"></i></div>
+            <div style="flex:1;">
+                <div style="font-weight:700;">${streak.count > 0 ? `${streak.count}-day streak` : 'Start your streak'}</div>
+                <div style="font-size:12px; color: var(--text-slate);">${postedToday ? "Nice — you've posted today!" : 'Post a verse, note, or reflection to keep it going.'}</div>
+            </div>
+            ${!postedToday ? `<button class="btn btn-primary btn-sm" onclick="showCreateSpacePostModal()">Post</button>` : ''}
+        </div>
+    `;
+}
+
+/* ---- Page render ---- */
+async function renderSpacePage() {
+    DOM.pageContainer.innerHTML = `
+        <div class="space-container" style="max-width: 640px; margin: 0 auto; padding: 12px;">
+            <div id="space-streak-slot">${renderSpaceStreakBanner()}</div>
+            <div id="space-feed" class="space-feed">
+                <div class="skeleton" style="height: 220px; border-radius: 16px; margin-bottom: 14px;"></div>
+                <div class="skeleton" style="height: 220px; border-radius: 16px;"></div>
+            </div>
+        </div>
+    `;
+
+    await loadSpaceStreak();
+    $('#space-streak-slot').innerHTML = renderSpaceStreakBanner();
+    await loadSpacePosts();
+}
+
+async function loadSpacePosts() {
+    const container = $('#space-feed');
     if (!container) return;
 
     try {
-        const snapshot = await database.ref('reels').orderByChild('timestamp').limitToLast(50).once('value');
-        const reels = snapshot.val() || {};
-        AppState.reels = Object.values(reels).reverse();
+        const snapshot = await database.ref('spacePosts').orderByChild('timestamp').limitToLast(60).once('value');
+        const posts = Object.values(snapshot.val() || {});
 
-        if (AppState.reels.length === 0) {
+        if (posts.length === 0) {
             container.innerHTML = `
-                <div class="reel-slide reel-empty-slide">
-                    <div class="text-center">
-                        <i class="fas fa-play" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px; color: white;"></i>
-                        <h3 style="margin-bottom: 8px; color: white;">No Reels Yet</h3>
-                        <p style="color: rgba(255,255,255,0.7);">Be the first to share a verse or moment.</p>
-                        <button class="btn btn-primary mt-3" onclick="showCreateReelModal()">
-                            <i class="fas fa-plus"></i> Create a Reel
-                        </button>
-                    </div>
+                <div class="text-center" style="padding: 60px 20px;">
+                    <i class="fas fa-compass" style="font-size: 44px; opacity: 0.3; margin-bottom: 16px;"></i>
+                    <h3 style="margin-bottom: 8px;">Space is quiet right now</h3>
+                    <p class="text-muted" style="margin-bottom:16px;">Be the first to share a verse, note, or reflection.</p>
+                    <button class="btn btn-primary" onclick="showCreateSpacePostModal()"><i class="fas fa-plus"></i> Create a Post</button>
                 </div>
             `;
             return;
         }
 
-        container.innerHTML = AppState.reels.map(reel => renderReelSlide(reel)).join('');
-        initReelVideoObservers();
+        // Personalized ranking: score every post against the user's interest
+        // profile, but always keep the handful of newest posts near the top
+        // too, so Space never feels stale or like a total echo chamber.
+        const scored = posts.map(post => ({
+            post,
+            score: scoreForInterest(post.tags, post.sourceBook, post.timestamp, Object.keys(post.amens || {}).length + Object.keys(post.comments || {}).length)
+        })).sort((a, b) => b.score - a.score);
+
+        const newest = [...posts].sort((a, b) => b.timestamp - a.timestamp).slice(0, 3).map(p => p.id);
+        const ranked = [...scored.map(s => s.post)];
+        // Ensure the 3 newest posts appear within the first 6 cards even if
+        // their personalization score is low (freshness guarantee).
+        newest.forEach(id => {
+            const idx = ranked.findIndex(p => p.id === id);
+            if (idx > 5) {
+                const [item] = ranked.splice(idx, 1);
+                ranked.splice(Math.min(2, ranked.length), 0, item);
+            }
+        });
+
+        AppState.spacePosts = ranked;
+        container.innerHTML = ranked.map(post => renderSpaceCard(post)).join('');
+        initSpaceCarouselObservers();
     } catch (error) {
-        console.error('Error loading reels:', error);
-        container.innerHTML = `<div class="reel-slide reel-empty-slide"><p style="color:white;">Failed to load reels.</p></div>`;
+        console.error('Error loading Space posts:', error);
+        container.innerHTML = `<p class="text-center text-muted" style="padding: 40px 20px;">Couldn't load Space right now.</p>`;
     }
 }
 
-function renderReelSlide(reel) {
-    const isLoved = reel.likes && AppState.currentUser && reel.likes[AppState.currentUser.uid];
-    const loveCount = reel.likes ? Object.keys(reel.likes).length : 0;
-    const commentCount = reel.comments ? Object.keys(reel.comments).length : 0;
-    const authorName = escapeHtml(reel.authorName || 'Anonymous');
-    const safeName = authorName.replace(/'/g, "\\'");
+function renderSpaceSlides(post) {
+    const slides = post.slides && post.slides.length > 0 ? post.slides : [{ kind: 'text', text: '' }];
 
-    let mediaHTML = '';
-    if (reel.type === 'video') {
-        mediaHTML = `<div class="reel-video-wrap">${renderEmbed(reel.videoUrl)}</div>`;
-    } else if (reel.type === 'verses' && reel.verses && reel.verses.length > 1) {
-        mediaHTML = `
-            <div class="reel-verse-album">
-                ${reel.verses.map(v => `
-                    <div class="verse-album-card">
-                        <p class="verse-album-text">"${escapeHtml(v.text)}"</p>
-                        <p class="verse-album-ref">${escapeHtml(v.book)} ${v.chapter}:${v.verse} • ${escapeHtml(v.version || 'KJV')}</p>
+    return `
+        <div class="space-carousel" id="carousel-${post.id}">
+            <div class="space-carousel-track">
+                ${slides.map(slide => `
+                    <div class="space-slide">
+                        ${slide.kind === 'verse' ? `
+                            <i class="fas fa-book-bible space-slide-icon"></i>
+                            <p class="space-slide-text">"${escapeHtml(slide.text || '')}"</p>
+                            <p class="space-slide-ref">${escapeHtml(slide.book || '')} ${slide.chapter || ''}:${slide.verse || ''} • ${escapeHtml(slide.version || AppState.bibleVersion || 'KJV')}</p>
+                        ` : `
+                            ${slide.label ? `<div class="space-slide-label">${escapeHtml(slide.label)}</div>` : ''}
+                            <p class="space-slide-text">${escapeHtml(slide.text || '')}</p>
+                        `}
                     </div>
                 `).join('')}
             </div>
-        `;
-    } else if (reel.type === 'verses' && reel.verses && reel.verses.length === 1) {
-        const v = reel.verses[0];
-        mediaHTML = `
-            <div class="reel-text-slide">
-                <p class="reel-quote">"${escapeHtml(v.text)}"</p>
-                <p class="reel-quote-ref">${escapeHtml(v.book)} ${v.chapter}:${v.verse} • ${escapeHtml(v.version || 'KJV')}</p>
+        </div>
+        ${slides.length > 1 ? `
+            <div class="space-carousel-dots" id="dots-${post.id}">
+                ${slides.map((_, i) => `<span class="space-dot ${i === 0 ? 'active' : ''}" onclick="scrollSpaceCarousel('${post.id}', ${i})"></span>`).join('')}
             </div>
-        `;
+        ` : ''}
+    `;
+}
+
+function renderSpaceCard(post) {
+    const uid = AppState.currentUser?.uid;
+    const isAmen = uid && post.amens && post.amens[uid];
+    const isSaved = uid && post.saves && post.saves[uid];
+    const amenCount = post.amens ? Object.keys(post.amens).length : 0;
+    const commentCount = post.comments ? Object.keys(post.comments).length : 0;
+    const authorName = escapeHtml(post.authorName || 'Anonymous');
+    const safeName = authorName.replace(/'/g, "\\'");
+
+    const typeIcon = {
+        verses: 'fa-book-bible',
+        note: 'fa-sticky-note',
+        plan: 'fa-calendar-check',
+        shepherd: 'fa-dove',
+        video: 'fa-video',
+        text: 'fa-quote-left'
+    }[post.type] || 'fa-quote-left';
+
+    let mediaHTML;
+    if (post.type === 'video' && post.videoUrl) {
+        mediaHTML = `<div class="space-video-wrap">${renderEmbed(post.videoUrl)}</div>`;
     } else {
-        mediaHTML = `
-            <div class="reel-text-slide">
-                <p class="reel-quote">${escapeHtml(reel.textContent || '')}</p>
-            </div>
-        `;
+        mediaHTML = renderSpaceSlides(post);
     }
 
-    const readChapterBtn = reel.sourceBook ? `
-        <button class="reel-chapter-btn" onclick="openBibleChapter('${reel.sourceBook.replace(/'/g, "\\'")}', ${reel.sourceChapter})">
+    const readChapterBtn = post.sourceBook ? `
+        <button class="space-chapter-btn" onclick="openBibleChapter('${post.sourceBook.replace(/'/g, "\\'")}', ${post.sourceChapter})">
             <i class="fas fa-book-bible"></i> Read Full Chapter
         </button>
-    ` : '';
+    ` : (post.type === 'plan' ? `
+        <button class="space-chapter-btn" onclick="navigateTo('planner')">
+            <i class="fas fa-calendar-check"></i> View Study Plan
+        </button>
+    ` : '');
 
     return `
-        <div class="reel-slide" id="reel-${reel.id}">
-            ${mediaHTML}
-
-            <div class="reel-overlay-top"></div>
-            <div class="reel-overlay-bottom"></div>
-
-            <div class="reel-author-row" onclick="viewUserProfile('${reel.authorId}', '${safeName}')">
-                <div class="post-avatar reel-author-avatar">${authorName[0]?.toUpperCase() || 'U'}</div>
-                <div>
-                    <div class="reel-author-name">${authorName}</div>
-                    <div class="reel-author-time">${formatDate(reel.timestamp)}</div>
+        <div class="space-card" id="space-${post.id}">
+            <div class="space-card-header" onclick="viewUserProfile('${post.authorId}', '${safeName}')">
+                <div class="post-avatar space-author-avatar">${authorName[0]?.toUpperCase() || 'U'}</div>
+                <div style="flex:1;">
+                    <div class="space-author-name">${authorName}</div>
+                    <div class="space-author-time">${formatDate(post.timestamp)}</div>
                 </div>
+                <i class="fas ${typeIcon}" style="color: var(--text-slate); opacity:0.6;"></i>
             </div>
 
+            ${mediaHTML}
             ${readChapterBtn}
 
-            <div class="reel-actions">
-                <button class="reel-action-btn ${isLoved ? 'loved' : ''}" onclick="loveReel('${reel.id}')" aria-label="Drop a heart">
-                    <i class="fas fa-heart"></i>
-                    <span>${loveCount}</span>
+            <div class="space-actions">
+                <button class="space-action-btn ${isAmen ? 'active' : ''}" onclick="toggleSpaceAmen('${post.id}')" aria-label="Amen">
+                    <i class="fas fa-hands-praying"></i> <span>Amen${amenCount > 0 ? ` · ${amenCount}` : ''}</span>
                 </button>
-                <button class="reel-action-btn" onclick="showReelComments('${reel.id}')" aria-label="Comments">
-                    <i class="fas fa-comment"></i>
-                    <span>${commentCount}</span>
+                <button class="space-action-btn" onclick="showSpacePostComments('${post.id}')" aria-label="Comments">
+                    <i class="fas fa-comment"></i> <span>${commentCount > 0 ? commentCount : 'Comment'}</span>
                 </button>
-                <button class="reel-action-btn" onclick="shareReel('${reel.id}')" aria-label="Share">
+                <button class="space-action-btn ${isSaved ? 'active' : ''}" onclick="toggleSpaceSave('${post.id}')" aria-label="Save">
+                    <i class="fas ${isSaved ? 'fa-bookmark' : 'fa-bookmark'}"></i> <span>${isSaved ? 'Saved' : 'Save'}</span>
+                </button>
+                <button class="space-action-btn" onclick="shareSpacePost('${post.id}')" aria-label="Share">
                     <i class="fas fa-share"></i>
                 </button>
-                ${reel.authorId === AppState.currentUser?.uid ? `
-                    <button class="reel-action-btn" onclick="deleteReel('${reel.id}')" aria-label="Delete">
+                ${post.authorId === uid ? `
+                    <button class="space-action-btn" onclick="deleteSpacePost('${post.id}')" aria-label="Delete">
                         <i class="fas fa-trash"></i>
                     </button>
                 ` : ''}
@@ -1652,168 +1908,246 @@ function renderReelSlide(reel) {
     `;
 }
 
-function showCreateReelModal(prefill) {
-    prefill = prefill || {};
-    const modalContent = `
-        <h3 style="margin-bottom: 16px;">Create a Reel</h3>
+function scrollSpaceCarousel(postId, index) {
+    const track = document.querySelector(`#carousel-${postId} .space-carousel-track`);
+    const dotsWrap = document.getElementById(`dots-${postId}`);
+    if (!track) return;
 
-        ${prefill.verses ? `
-            <div style="background: rgba(48,72,58,0.08); padding: 12px; border-radius: 8px; margin-bottom: 16px;">
-                <i class="fas fa-book-bible"></i> ${prefill.verses.length} verse${prefill.verses.length > 1 ? 's' : ''} selected from ${escapeHtml(prefill.sourceBook || '')} ${prefill.sourceChapter || ''}
-            </div>
-        ` : `
-            <div class="form-group">
-                <label class="form-label">Share your thoughts</label>
-                <textarea id="reel-text-content" class="form-textarea" placeholder="Share a testimony, thought, or encouragement..." rows="4"></textarea>
-            </div>
+    const slideWidth = track.querySelector('.space-slide')?.offsetWidth || track.offsetWidth;
+    track.scrollTo({ left: slideWidth * index, behavior: 'smooth' });
 
-            <div class="form-group">
-                <label class="form-label">Or paste a video link (YouTube, X/Twitter)</label>
-                <input type="url" id="reel-video-url" class="form-input" placeholder="https://...">
-            </div>
-        `}
+    if (dotsWrap) {
+        $$('.space-dot', dotsWrap).forEach((dot, i) => dot.classList.toggle('active', i === index));
+    }
+}
 
-        <button id="submit-reel-btn" class="btn btn-primary btn-block mt-3">Post Reel</button>
-    `;
-
-    showModal(modalContent);
-
-    $('#submit-reel-btn').addEventListener('click', async () => {
-        if (!requireAuth('Sign in to post.')) return;
-
-        let reel;
-
-        if (prefill.verses) {
-            reel = {
-                id: generateId(),
-                authorId: AppState.currentUser.uid,
-                authorName: AppState.userProfile?.username || 'Anonymous',
-                type: 'verses',
-                verses: prefill.verses,
-                sourceBook: prefill.sourceBook || null,
-                sourceChapter: prefill.sourceChapter || null,
-                timestamp: Date.now(),
-                likes: {},
-                comments: {}
-            };
-        } else {
-            const textContent = $('#reel-text-content')?.value.trim();
-            const videoUrl = $('#reel-video-url')?.value.trim();
-
-            if (!textContent && !videoUrl) {
-                showToast('Please write something or add a video link', 'warning');
-                return;
-            }
-
-            const moderationResult = await moderateContent(textContent || '');
-            if (moderationResult.flagged && moderationResult.action === 'hide') {
-                showToast('Your reel was flagged by moderation', 'error');
-                return;
-            }
-
-            reel = {
-                id: generateId(),
-                authorId: AppState.currentUser.uid,
-                authorName: AppState.userProfile?.username || 'Anonymous',
-                type: videoUrl ? 'video' : 'text',
-                textContent: videoUrl ? null : textContent,
-                videoUrl: videoUrl || null,
-                timestamp: Date.now(),
-                likes: {},
-                comments: {}
-            };
-        }
-
-        try {
-            await database.ref(`reels/${reel.id}`).set(reel);
-            closeModal();
-            showToast('Reel posted!', 'success');
-            navigateTo('reels');
-        } catch (error) {
-            showToast('Failed to post reel', 'error');
-        }
+function initSpaceCarouselObservers() {
+    $$('.space-carousel-track').forEach(track => {
+        track.addEventListener('scroll', () => {
+            clearTimeout(track._scrollTimer);
+            track._scrollTimer = setTimeout(() => {
+                const slideWidth = track.querySelector('.space-slide')?.offsetWidth || 1;
+                const index = Math.round(track.scrollLeft / slideWidth);
+                const carousel = track.closest('.space-carousel');
+                const dotsWrap = document.getElementById(`dots-${carousel.id.replace('carousel-', '')}`);
+                if (dotsWrap) {
+                    $$('.space-dot', dotsWrap).forEach((dot, i) => dot.classList.toggle('active', i === index));
+                }
+            }, 100);
+        }, { passive: true });
     });
 }
 
-function updateReelCardDOM(reelId) {
-    const reel = AppState.reels.find(r => r.id === reelId);
-    const el = document.getElementById(`reel-${reelId}`);
-    if (reel && el) {
-        el.outerHTML = renderReelSlide(reel);
-        initReelVideoObservers();
+function updateSpaceCardDOM(postId) {
+    const post = AppState.spacePosts.find(p => p.id === postId);
+    const el = document.getElementById(`space-${postId}`);
+    if (post && el) {
+        el.outerHTML = renderSpaceCard(post);
+        initSpaceCarouselObservers();
     }
 }
 
-function deleteReel(reelId) {
-    showModal(`
-        <h3 style="margin-bottom: 16px;">Delete Reel</h3>
-        <p>Are you sure you want to delete this reel?</p>
-        <div style="display: flex; gap: 8px; margin-top: 16px;">
-            <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-            <button class="btn btn-accent" onclick="confirmDeleteReel('${reelId}')">Delete</button>
+/* ---- Creating a post ---- */
+function showCreateSpacePostModal(prefill) {
+    prefill = prefill || {};
+
+    if (prefill.verses) {
+        submitCreateSpacePost({
+            type: 'verses',
+            slides: prefill.verses.map(v => ({ kind: 'verse', book: v.book, chapter: v.chapter, verse: v.verse, text: v.text, version: v.version })),
+            sourceBook: prefill.sourceBook,
+            sourceChapter: prefill.sourceChapter,
+            tags: extractTags(prefill.verses.map(v => v.text).join(' '))
+        });
+        return;
+    }
+
+    const modalContent = `
+        <h3 style="margin-bottom: 4px;">Post to Space</h3>
+        <p class="text-muted" style="font-size:12px; margin-bottom:14px;">Share something devotional with the community — and keep your streak going.</p>
+        <div style="display:grid; gap:8px; margin-bottom: 14px;" id="space-post-type-picker">
+            <button class="btn btn-outline btn-block" onclick="showSpacePostComposer('text')"><i class="fas fa-quote-left"></i> Testimony / Thought</button>
+            <button class="btn btn-outline btn-block" onclick="showSpacePostComposer('note')"><i class="fas fa-sticky-note"></i> Share a Note</button>
+            <button class="btn btn-outline btn-block" onclick="showSpacePostComposer('plan')"><i class="fas fa-calendar-check"></i> Share a Study Plan</button>
+            <button class="btn btn-outline btn-block" onclick="showSpacePostComposer('video')"><i class="fas fa-video"></i> Video Link</button>
         </div>
-    `);
+        <div id="space-post-composer"></div>
+    `;
+    showModal(modalContent);
 }
 
-async function confirmDeleteReel(reelId) {
-    try {
-        await database.ref(`reels/${reelId}`).remove();
-        closeModal();
-        showToast('Reel deleted', 'success');
-        // Remove just this slide — reloading the whole feed would reset
-        // everyone's scroll position back to the top reel.
-        AppState.reels = AppState.reels.filter(r => r.id !== reelId);
-        document.getElementById(`reel-${reelId}`)?.remove();
-    } catch (error) {
-        showToast('Failed to delete reel', 'error');
+function showSpacePostComposer(kind) {
+    const slot = $('#space-post-composer');
+    if (!slot) return;
+
+    if (kind === 'text') {
+        slot.innerHTML = `
+            <div class="form-group">
+                <textarea id="space-text-input" class="form-textarea" rows="4" placeholder="Share a testimony, thought, or encouragement..."></textarea>
+            </div>
+            <button class="btn btn-primary btn-block" onclick="submitTextSpacePost()">Post</button>
+        `;
+    } else if (kind === 'video') {
+        slot.innerHTML = `
+            <div class="form-group">
+                <input type="url" id="space-video-input" class="form-input" placeholder="https://youtube.com/... or https://x.com/...">
+            </div>
+            <button class="btn btn-primary btn-block" onclick="submitVideoSpacePost()">Post</button>
+        `;
+    } else if (kind === 'note') {
+        if (AppState.notes.length === 0) {
+            slot.innerHTML = `<p class="text-muted text-center">You have no notes yet — add one from the Bible reader.</p>`;
+            return;
+        }
+        slot.innerHTML = `
+            <div style="display:grid; gap:8px; max-height:220px; overflow-y:auto;">
+                ${AppState.notes.map((note, i) => `
+                    <button class="btn btn-outline btn-block" style="text-align:left;" onclick="submitNoteSpacePost(${i})">
+                        <div style="font-weight:600;">${escapeHtml(note.reference || 'Note')}</div>
+                        <div style="font-size:12px; color:var(--text-slate); white-space:normal;">${escapeHtml((note.text || '').slice(0, 70))}${(note.text || '').length > 70 ? '…' : ''}</div>
+                    </button>
+                `).join('')}
+            </div>
+        `;
+    } else if (kind === 'plan') {
+        if (AppState.plannerData.length === 0) {
+            slot.innerHTML = `<p class="text-muted text-center">You have no study plans yet.</p>`;
+            return;
+        }
+        slot.innerHTML = `
+            <div style="display:grid; gap:8px;">
+                ${AppState.plannerData.map((plan, i) => `
+                    <button class="btn btn-outline btn-block" onclick="submitPlanSpacePost(${i})">${escapeHtml(plan.name || plan.title || plan.planType || 'Study Plan')}</button>
+                `).join('')}
+            </div>
+        `;
     }
 }
 
-async function loveReel(reelId) {
-    if (!requireAuth('Sign in to react to reels.')) return;
+async function submitCreateSpacePost(fields) {
+    if (!requireAuth('Sign in to post.')) return;
+
+    const post = buildSpacePostObject(fields);
+
+    try {
+        await database.ref(`spacePosts/${post.id}`).set(post);
+
+        // Personalization + streak — creating content is a strong signal.
+        (post.tags || []).forEach(tag => recordInterestSignal('tag', tag, 2.5));
+        if (post.sourceBook) recordInterestSignal('book', post.sourceBook, 2);
+        await bumpSpaceStreak();
+
+        closeModal();
+        showToast('Posted to Space!', 'success');
+        navigateTo('space');
+    } catch (error) {
+        showToast('Failed to post', 'error');
+        console.error(error);
+    }
+}
+
+async function submitTextSpacePost() {
+    const text = $('#space-text-input')?.value.trim();
+    if (!text) { showToast('Please write something first', 'warning'); return; }
+
+    const moderationResult = await moderateContent(text);
+    if (moderationResult.flagged && moderationResult.action === 'hide') {
+        showToast('Your post was flagged by moderation', 'error');
+        return;
+    }
+
+    submitCreateSpacePost({ type: 'text', slides: splitTextIntoSlides(text, ''), tags: extractTags(text) });
+}
+
+function submitVideoSpacePost() {
+    const url = $('#space-video-input')?.value.trim();
+    if (!url) { showToast('Please paste a video link', 'warning'); return; }
+    submitCreateSpacePost({ type: 'video', videoUrl: url, slides: [] });
+}
+
+function submitNoteSpacePost(index) {
+    const note = AppState.notes[index];
+    if (!note) return;
+    submitCreateSpacePost({
+        type: 'note',
+        slides: [{ kind: 'text', label: note.reference || 'Note', text: note.text || '' }],
+        sourceBook: note.book,
+        sourceChapter: note.chapter,
+        tags: extractTags(note.text)
+    });
+}
+
+function submitPlanSpacePost(index) {
+    const plan = AppState.plannerData[index];
+    if (!plan) return;
+    const name = plan.name || plan.title || plan.planType || 'Study Plan';
+    submitCreateSpacePost({
+        type: 'plan',
+        slides: [{ kind: 'text', label: 'Study Plan', text: name }],
+        planName: name,
+        tags: extractTags(name)
+    });
+}
+
+/* ---- Reactions, comments, delete, share ---- */
+async function toggleSpaceAmen(postId) {
+    if (!requireAuth('Sign in to react.')) return;
 
     const uid = AppState.currentUser.uid;
-    const loveRef = database.ref(`reels/${reelId}/likes/${uid}`);
-    const reel = AppState.reels.find(r => r.id === reelId);
+    const ref = database.ref(`spacePosts/${postId}/amens/${uid}`);
+    const post = AppState.spacePosts.find(p => p.id === postId);
 
     try {
-        const snapshot = await loveRef.once('value');
+        const snapshot = await ref.once('value');
         if (snapshot.exists()) {
-            await loveRef.remove();
-            if (reel?.likes) delete reel.likes[uid];
+            await ref.remove();
+            if (post?.amens) delete post.amens[uid];
         } else {
-            await loveRef.set(true);
-            if (reel) {
-                reel.likes = reel.likes || {};
-                reel.likes[uid] = true;
-            }
-            showToast('You dropped a heart on their reel', 'success');
+            await ref.set(true);
+            if (post) { post.amens = post.amens || {}; post.amens[uid] = true; }
+            (post?.tags || []).forEach(tag => recordInterestSignal('tag', tag, 1));
+            if (post?.sourceBook) recordInterestSignal('book', post.sourceBook, 1);
         }
-        // Update just this card in place — don't reload the whole feed.
-        updateReelCardDOM(reelId);
+        updateSpaceCardDOM(postId);
     } catch (error) {
         showToast('Failed to update', 'error');
     }
 }
 
-function showReelComments(reelId) {
-    const reel = AppState.reels.find(r => r.id === reelId);
-    if (!reel) return;
+async function toggleSpaceSave(postId) {
+    if (!requireAuth('Sign in to save posts.')) return;
 
-    const renderCommentsList = (comments) => {
-        const list = Object.entries(comments || {})
-            .map(([id, c]) => ({ id, ...c }))
-            .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+    const uid = AppState.currentUser.uid;
+    const ref = database.ref(`spacePosts/${postId}/saves/${uid}`);
+    const post = AppState.spacePosts.find(p => p.id === postId);
 
-        if (list.length === 0) {
-            return `<p class="text-center text-muted" style="padding: 20px 0;">No comments yet. Be the first to respond.</p>`;
+    try {
+        const snapshot = await ref.once('value');
+        if (snapshot.exists()) {
+            await ref.remove();
+            if (post?.saves) delete post.saves[uid];
+        } else {
+            await ref.set(true);
+            if (post) { post.saves = post.saves || {}; post.saves[uid] = true; }
+            (post?.tags || []).forEach(tag => recordInterestSignal('tag', tag, 2));
+            showToast('Saved to your Space bookmarks', 'success');
         }
+        updateSpaceCardDOM(postId);
+    } catch (error) {
+        showToast('Failed to save', 'error');
+    }
+}
 
+function showSpacePostComments(postId) {
+    const post = AppState.spacePosts.find(p => p.id === postId);
+    if (!post) return;
+
+    const renderList = (comments) => {
+        const list = Object.entries(comments || {}).map(([id, c]) => ({ id, ...c })).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+        if (list.length === 0) return `<p class="text-center text-muted" style="padding: 20px 0;">No comments yet. Be the first to respond.</p>`;
         return list.map(c => `
             <div class="comment-item">
-                <div class="post-avatar comment-avatar" style="cursor:pointer;" onclick="viewUserProfile('${c.authorId}', '${(c.authorName || 'User').replace(/'/g, "\\'")}')">
-                    ${(c.authorName || 'U')[0].toUpperCase()}
-                </div>
+                <div class="post-avatar comment-avatar" style="cursor:pointer;" onclick="viewUserProfile('${c.authorId}', '${(c.authorName || 'User').replace(/'/g, "\\'")}')">${(c.authorName || 'U')[0].toUpperCase()}</div>
                 <div class="comment-body">
                     <div class="comment-meta">
                         <span class="comment-author" style="cursor:pointer;" onclick="viewUserProfile('${c.authorId}', '${(c.authorName || 'User').replace(/'/g, "\\'")}')">${escapeHtml(c.authorName || 'Anonymous')}</span>
@@ -1825,215 +2159,95 @@ function showReelComments(reelId) {
         `).join('');
     };
 
-    const sheetContent = `
+    showSheet(`
         <h3 style="margin-bottom: 12px;">Comments</h3>
-        <div id="comments-list" style="max-height: 40vh; overflow-y: auto; margin-bottom: 12px;">
-            ${renderCommentsList(reel.comments)}
-        </div>
+        <div id="comments-list" style="max-height: 40vh; overflow-y: auto; margin-bottom: 12px;">${renderList(post.comments)}</div>
         <div class="comment-input-row">
-            <input type="text" id="new-comment-input" class="form-input" placeholder="Write a comment..." onkeypress="if(event.key === 'Enter') submitReelComment('${reelId}')">
-            <button class="btn btn-primary btn-sm" onclick="submitReelComment('${reelId}')">
-                <i class="fas fa-paper-plane"></i>
-            </button>
+            <input type="text" id="new-comment-input" class="form-input" placeholder="Write a comment..." onkeypress="if(event.key === 'Enter') submitSpacePostComment('${postId}')">
+            <button class="btn btn-primary btn-sm" onclick="submitSpacePostComment('${postId}')"><i class="fas fa-paper-plane"></i></button>
         </div>
-    `;
-
-    showSheet(sheetContent);
+    `);
     setTimeout(() => $('#new-comment-input')?.focus(), 200);
 }
 
-async function submitReelComment(reelId) {
+async function submitSpacePostComment(postId) {
     if (!requireAuth('Sign in to comment.')) return;
 
     const input = $('#new-comment-input');
     const content = input?.value.trim();
     if (!content) return;
-
     input.value = '';
 
-    const comment = {
-        authorId: AppState.currentUser.uid,
-        authorName: AppState.userProfile?.username || 'Anonymous',
-        content,
-        timestamp: Date.now()
-    };
+    const comment = { authorId: AppState.currentUser.uid, authorName: AppState.userProfile?.username || 'Anonymous', content, timestamp: Date.now() };
 
     try {
         const commentId = generateId();
-        await database.ref(`reels/${reelId}/comments/${commentId}`).set(comment);
+        await database.ref(`spacePosts/${postId}/comments/${commentId}`).set(comment);
 
-        const reel = AppState.reels.find(r => r.id === reelId);
-        if (reel) {
-            reel.comments = reel.comments || {};
-            reel.comments[commentId] = comment;
-        }
+        const post = AppState.spacePosts.find(p => p.id === postId);
+        if (post) { post.comments = post.comments || {}; post.comments[commentId] = comment; }
 
-        showReelComments(reelId);
-        updateReelCardDOM(reelId);
+        extractTags(content).forEach(tag => recordInterestSignal('tag', tag, 1.5));
+
+        showSpacePostComments(postId);
+        updateSpaceCardDOM(postId);
     } catch (error) {
         showToast('Failed to post comment', 'error');
-        console.error(error);
     }
 }
 
-function renderEmbed(url) {
-    // YouTube — render a lightweight thumbnail placeholder. The actual
-    // iframe is only created once this slide scrolls into view (see
-    // initReelVideoObservers), so it autoplays as the user scrolls to it
-    // and stops (freeing resources) once they scroll past.
-    if (url && (url.includes('youtube.com') || url.includes('youtu.be'))) {
-        const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
-        if (videoId) {
-            return `
-                <div class="reel-yt-wrap" data-yt-id="${videoId}">
-                    <img class="reel-yt-thumb" src="https://img.youtube.com/vi/${videoId}/hqdefault.jpg" alt="" loading="lazy">
-                    <div class="reel-yt-play"><i class="fas fa-play"></i></div>
-                </div>
-            `;
-        }
+function deleteSpacePost(postId) {
+    showModal(`
+        <h3 style="margin-bottom: 16px;">Delete Post</h3>
+        <p>Are you sure you want to delete this Space post?</p>
+        <div style="display:flex; gap:8px; margin-top:16px;">
+            <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-accent" onclick="confirmDeleteSpacePost('${postId}')">Delete</button>
+        </div>
+    `);
+}
+
+async function confirmDeleteSpacePost(postId) {
+    try {
+        await database.ref(`spacePosts/${postId}`).remove();
+        closeModal();
+        showToast('Post deleted', 'success');
+        AppState.spacePosts = AppState.spacePosts.filter(p => p.id !== postId);
+        document.getElementById(`space-${postId}`)?.remove();
+    } catch (error) {
+        showToast('Failed to delete', 'error');
     }
-
-    // Twitter/X — render an actual embedded tweet (including native video
-    // playback) via Twitter's widgets.js, instead of just linking out.
-    if (url && (url.includes('twitter.com') || url.includes('x.com'))) {
-        return `
-            <div class="reel-tweet-wrap">
-                <blockquote class="twitter-tweet" data-theme="dark" data-dnt="true">
-                    <a href="${url}"></a>
-                </blockquote>
-            </div>
-        `;
-    }
-
-    return `<div class="reel-link-card"><i class="fas fa-link" style="font-size: 32px;"></i><a href="${url}" target="_blank">View Link</a></div>`;
 }
 
-/* ---- Scroll-triggered playback: YouTube autoplay + Twitter widget hydration ---- */
-let twitterWidgetsLoadingPromise = null;
+async function shareSpacePost(postId) {
+    const post = AppState.spacePosts.find(p => p.id === postId);
+    if (!post) return;
 
-function ensureTwitterWidgetsLoaded() {
-    if (window.twttr && window.twttr.widgets) return Promise.resolve(window.twttr);
-    if (twitterWidgetsLoadingPromise) return twitterWidgetsLoadingPromise;
-
-    twitterWidgetsLoadingPromise = new Promise((resolve) => {
-        const existing = document.getElementById('twitter-widgets-js');
-        if (existing) {
-            existing.addEventListener('load', () => resolve(window.twttr));
-            return;
-        }
-        const script = document.createElement('script');
-        script.id = 'twitter-widgets-js';
-        script.src = 'https://platform.twitter.com/widgets.js';
-        script.async = true;
-        script.charset = 'utf-8';
-        script.onload = () => resolve(window.twttr);
-        document.head.appendChild(script);
-    });
-
-    return twitterWidgetsLoadingPromise;
-}
-
-let reelVideoObserver = null;
-
-function initReelVideoObservers() {
-    // Hydrate any tweet placeholders into real, playable embeds.
-    ensureTwitterWidgetsLoaded().then((twttr) => {
-        if (twttr?.widgets) twttr.widgets.load();
-    });
-
-    const container = document.getElementById('reels-container');
-    if (!container) return;
-
-    if (reelVideoObserver) reelVideoObserver.disconnect();
-
-    reelVideoObserver = new IntersectionObserver((entries) => {
-        entries.forEach(entry => {
-            const ytWrap = entry.target.querySelector('.reel-yt-wrap');
-            if (!ytWrap) return;
-
-            if (entry.isIntersecting && entry.intersectionRatio >= 0.6) {
-                activateYouTubeSlide(ytWrap);
-            } else {
-                deactivateYouTubeSlide(ytWrap);
-            }
-        });
-    }, { root: container, threshold: [0, 0.6, 1] });
-
-    container.querySelectorAll('.reel-slide').forEach(slide => reelVideoObserver.observe(slide));
-}
-
-function activateYouTubeSlide(ytWrap) {
-    if (ytWrap.querySelector('iframe')) return;
-
-    const videoId = ytWrap.dataset.ytId;
-    if (!videoId) return;
-
-    const iframe = document.createElement('iframe');
-    iframe.src = `https://www.youtube.com/embed/${videoId}?autoplay=1&mute=1&playsinline=1&loop=1&playlist=${videoId}&controls=1&rel=0`;
-    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture';
-    iframe.setAttribute('frameborder', '0');
-    iframe.setAttribute('allowfullscreen', '');
-    iframe.className = 'reel-yt-iframe';
-
-    ytWrap.appendChild(iframe);
-    ytWrap.classList.add('playing');
-}
-
-function deactivateYouTubeSlide(ytWrap) {
-    const iframe = ytWrap.querySelector('iframe');
-    if (iframe) iframe.remove();
-    ytWrap.classList.remove('playing');
-}
-
-async function moderateContent(content) {
-    // Simple moderation (in production, use more sophisticated AI moderation)
-    const bannedWords = ['spam', 'scam', 'hack', 'illegal', 'explicit'];
-    const flagged = bannedWords.some(word => content.toLowerCase().includes(word));
-
-    if (flagged) {
-        return { flagged: true, action: 'hide' };
-    }
-
-    return { flagged: false, action: 'approve' };
-}
-
-async function shareReel(reelId) {
-    const reel = AppState.reels.find(r => r.id === reelId);
-    if (!reel) return;
-
-    let shareText = `${reel.authorName}: `;
-    if (reel.type === 'verses') {
-        shareText += reel.verses.map(v => `"${v.text}" (${v.book} ${v.chapter}:${v.verse})`).join(' ');
-    } else if (reel.type === 'video') {
-        shareText += reel.videoUrl;
+    let shareText = `${post.authorName}: `;
+    if (post.type === 'video') {
+        shareText += post.videoUrl;
     } else {
-        shareText += reel.textContent;
+        shareText += (post.slides || []).map(s => s.text).join(' ');
     }
 
     if (navigator.share) {
-        navigator.share({ title: 'GraceGuide Reel', text: shareText }).catch(() => {});
+        navigator.share({ title: 'GraceGuide Space', text: shareText }).catch(() => {});
     } else {
-        navigator.clipboard.writeText(shareText).then(() => {
-            showToast('Reel copied to clipboard!', 'success');
-        });
+        navigator.clipboard.writeText(shareText).then(() => showToast('Copied to clipboard!', 'success'));
     }
 
     if (AppState.currentUser) {
         try {
             const snapshot = await database.ref(`users/${AppState.currentUser.uid}/groups`).once('value');
             const groupIds = Object.keys(snapshot.val() || {});
-            if (groupIds.length > 0) {
-                showShareReelToGroupSheet(reelId, groupIds);
-            }
-        } catch (error) {
-            // silent — sharing to a group is a bonus, not required
-        }
+            if (groupIds.length > 0) showShareReelToGroupSheet(postId, groupIds);
+        } catch (error) { /* sharing to a group is a bonus, not required */ }
     }
 }
 
-function showShareReelToGroupSheet(reelId, groupIds) {
+function showShareReelToGroupSheet(postId, groupIds) {
     const groupsSnippet = groupIds.map(id => `
-        <button class="btn btn-outline btn-block" data-group-id="${id}" onclick="submitShareReelToGroup('${reelId}', '${id}')">
+        <button class="btn btn-outline btn-block" data-group-id="${id}" onclick="submitShareReelToGroup('${postId}', '${id}')">
             <i class="fas fa-users"></i> Share to group
         </button>
     `).join('');
@@ -2043,7 +2257,6 @@ function showShareReelToGroupSheet(reelId, groupIds) {
         <div style="display: grid; gap: 8px;">${groupsSnippet}</div>
     `);
 
-    // Fill in the actual group names asynchronously
     groupIds.forEach(async (id) => {
         try {
             const snap = await database.ref(`communityGroups/${id}/name`).once('value');
@@ -2054,16 +2267,10 @@ function showShareReelToGroupSheet(reelId, groupIds) {
     });
 }
 
-async function submitShareReelToGroup(reelId, groupId) {
+async function submitShareReelToGroup(postId, groupId) {
     if (!AppState.currentUser) return;
 
-    const msg = {
-        senderId: AppState.currentUser.uid,
-        senderName: AppState.userProfile?.username || 'Anonymous',
-        type: 'reel',
-        content: reelId,
-        timestamp: Date.now()
-    };
+    const msg = { senderId: AppState.currentUser.uid, senderName: AppState.userProfile?.username || 'Anonymous', type: 'reel', content: postId, timestamp: Date.now() };
     try {
         await database.ref(`communityGroups/${groupId}/messages/${generateId()}`).set(msg);
         closeSheet();
@@ -2073,3 +2280,26 @@ async function submitShareReelToGroup(reelId, groupId) {
     }
 }
 
+function renderEmbed(url) {
+    if (url && (url.includes('youtube.com') || url.includes('youtu.be'))) {
+        const videoId = url.match(/(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/)?.[1];
+        if (videoId) {
+            return `
+                <div class="space-yt-wrap">
+                    <img class="space-yt-thumb" src="https://img.youtube.com/vi/${videoId}/hqdefault.jpg" alt="" loading="lazy" onclick="this.parentElement.innerHTML='<iframe src=\\'https://www.youtube.com/embed/${videoId}?autoplay=1\\' allow=\\'autoplay; encrypted-media; picture-in-picture\\' allowfullscreen class=\\'space-yt-iframe\\'></iframe>'">
+                    <div class="space-yt-play"><i class="fas fa-play"></i></div>
+                </div>
+            `;
+        }
+    }
+    if (url && (url.includes('twitter.com') || url.includes('x.com'))) {
+        return `<div class="space-tweet-wrap"><blockquote class="twitter-tweet" data-dnt="true"><a href="${url}"></a></blockquote></div>`;
+    }
+    return `<div class="space-link-card"><i class="fas fa-link" style="font-size: 28px;"></i><a href="${url}" target="_blank">View Link</a></div>`;
+}
+
+async function moderateContent(content) {
+    const bannedWords = ['spam', 'scam', 'hack', 'illegal', 'explicit'];
+    const flagged = bannedWords.some(word => content.toLowerCase().includes(word));
+    return flagged ? { flagged: true, action: 'hide' } : { flagged: false, action: 'approve' };
+}
