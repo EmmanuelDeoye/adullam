@@ -38,14 +38,14 @@ const DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions";
 // but every modern browser ships at least one male and one female voice.
 
 // Bible API (scripture.api.bible) Configuration
-const BIBLE_API_KEY = "In0fpKKWPFAQj_Kjidnv";
+const BIBLE_API_KEY = "-In0fpKKWPFAQj_Kjidnv";
 const BIBLE_API_BASE = "https://api.scripture.api.bible/v1";
 // Bible IDs on api.bible for the supported translations
 const BIBLE_VERSIONS = {
   KJV: "de4e12af7f28f599-02",
-  NLT: "71c6eab17ae5b667-01",
-  MSG: "65eec8e0b60e656b-01",
-  AMP: "1588df8288f6c99b-01"
+  NLT: "d6e14a625393b4da-01",
+  MSG: "6f11a7de016f942e-01",
+  AMP: "a81b73293d3080c9-01"
 };
 // Initialize Firebase
 firebase.initializeApp(firebaseConfig);
