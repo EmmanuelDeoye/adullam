@@ -62,11 +62,16 @@ function renderGroupCard(group) {
     const isMember = uid && group.members && group.members[uid];
     const memberCount = group.members ? Object.keys(group.members).length : 0;
 
+    const hasUnread = AppState.unreadForumGroupIds && AppState.unreadForumGroupIds.has(group.id);
+
     return `
         <div class="group-card" onclick="openGroup('${group.id}')">
             <div class="group-card-icon"><i class="fas fa-users"></i></div>
             <div style="flex: 1; min-width: 0;">
-                <div style="font-weight: 700;">${escapeHtml(group.name)}</div>
+                <div style="font-weight: 700; display:flex; align-items:center; gap:6px;">
+                    ${escapeHtml(group.name)}
+                    ${hasUnread ? `<span class="drawer-badge-dot"></span>` : ''}
+                </div>
                 <div style="font-size: 12px; color: var(--text-slate); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(group.description || '')}</div>
                 <div style="font-size: 11px; color: var(--text-slate); margin-top: 4px;"><i class="fas fa-user-group"></i> ${memberCount} member${memberCount !== 1 ? 's' : ''}</div>
             </div>
@@ -187,6 +192,13 @@ async function renderGroupChatPage() {
         }
 
         await loadGroupMessages(groupId);
+
+        // Mark as read now that the user is viewing this group's messages.
+        if (uid && isMember) {
+            database.ref(`users/${uid}/groupReads/${groupId}`).set(Date.now()).catch(() => {});
+            if (AppState.unreadForumGroupIds) AppState.unreadForumGroupIds.delete(groupId);
+            if (typeof updateForumDrawerBadge === 'function') updateForumDrawerBadge();
+        }
     } catch (error) {
         console.error('Error loading group:', error);
     }
@@ -759,8 +771,9 @@ async function loadDMConversations() {
                     <div style="font-weight: 600; display:flex; align-items:center; gap:6px;">
                         ${escapeHtml(conv.otherUserName || 'User')}
                         ${conv.streak > 0 ? `<span class="streak-badge"><i class="fas fa-fire"></i> ${conv.streak}</span>` : ''}
+                        ${conv.unread ? `<span class="drawer-badge-dot" style="margin-left:2px;"></span>` : ''}
                     </div>
-                    <div style="font-size: 12px; color: var(--text-slate); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(conv.lastMessage || '')}</div>
+                    <div style="font-size: 12px; color: var(--text-slate); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:${conv.unread ? '600' : '400'};">${escapeHtml(conv.lastMessage || '')}</div>
                 </div>
                 <div style="font-size: 11px; color: var(--text-slate);">${conv.lastTimestamp ? formatDate(conv.lastTimestamp) : ''}</div>
             </div>
@@ -830,6 +843,9 @@ async function renderDMThreadPage() {
 
     await loadDMMessages();
     await refreshDMStreakBadge();
+
+    // Mark this thread as read now that the user is looking at it.
+    database.ref(`users/${AppState.currentUser.uid}/dmIndex/${otherUid}/unread`).set(false).catch(() => {});
 }
 
 async function refreshDMStreakBadge() {
@@ -978,14 +994,18 @@ async function deliverDMMessage(messageFields) {
             otherUserName: AppState.currentDMUserName || 'User',
             lastMessage: preview,
             lastTimestamp: Date.now(),
-            conversationId
+            conversationId,
+            unread: false
         });
 
+        // Recipient's side is marked unread so the drawer/chat list can
+        // show a live indicator until they open this thread.
         await database.ref(`users/${otherUid}/dmIndex/${uid}`).update({
             otherUserName: myName,
             lastMessage: preview,
             lastTimestamp: Date.now(),
-            conversationId
+            conversationId,
+            unread: true
         });
 
         if (STREAK_ELIGIBLE_TYPES.includes(messageFields.type)) {
@@ -1586,15 +1606,14 @@ function renderSettingsPage() {
    NOTIFICATIONS
    ============================================ */
 async function loadNotifications() {
+    // Kept for compatibility — startRealtimeListeners() now keeps
+    // AppState.notifications live, but this is a safe one-shot fallback.
     if (!AppState.currentUser) return;
-    
+
     try {
         const uid = AppState.currentUser.uid;
         const snapshot = await database.ref(`users/${uid}/notifications`).once('value');
         const raw = snapshot.val() || {};
-        // Firebase push() keys aren't sequential, so this always comes back
-        // as an object — normalize it to an array, keeping each entry's key
-        // so we can mark it read individually.
         AppState.notifications = Object.entries(raw)
             .map(([key, value]) => ({ key, ...value }))
             .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
@@ -1627,6 +1646,129 @@ async function addNotification(userId, notification) {
     } catch (error) {
         console.error('Error adding notification:', error);
     }
+}
+
+/* ============================================
+   REALTIME INDICATORS
+   Notifications, unread chats, and unread forum groups all update live
+   via Firebase's .on('value')/.on('child_*') listeners instead of
+   requiring a page refresh or re-navigation.
+   ============================================ */
+let _notifRef = null;
+let _dmIndexRef = null;
+let _groupsListRef = null;
+let _groupMsgRefs = {};
+let _notifKnownKeys = new Set();
+
+function startRealtimeListeners() {
+    if (!AppState.currentUser) return;
+    stopRealtimeListeners();
+    const uid = AppState.currentUser.uid;
+
+    // --- Notifications (space amens/comments, connection requests, etc.) ---
+    _notifKnownKeys = new Set(AppState.notifications.map(n => n.key));
+    _notifRef = database.ref(`users/${uid}/notifications`);
+    _notifRef.on('value', (snapshot) => {
+        const raw = snapshot.val() || {};
+        const next = Object.entries(raw)
+            .map(([key, value]) => ({ key, ...value }))
+            .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+        // Toast for genuinely new, unread notifications that arrive while
+        // the app is open (not the initial batch on first load).
+        if (_notifKnownKeys.size > 0 || AppState.notifications.length > 0) {
+            next.forEach(n => {
+                if (!n.read && !_notifKnownKeys.has(n.key)) {
+                    showToast(n.message || 'You have a new notification', 'info');
+                }
+            });
+        }
+        _notifKnownKeys = new Set(next.map(n => n.key));
+
+        AppState.notifications = next;
+        updateNotificationBadge();
+    });
+
+    // --- Unread direct messages ---
+    _dmIndexRef = database.ref(`users/${uid}/dmIndex`);
+    _dmIndexRef.on('value', (snapshot) => {
+        const data = snapshot.val() || {};
+        const list = Object.entries(data)
+            .map(([otherUid, info]) => ({ otherUid, ...info }))
+            .sort((a, b) => (b.lastTimestamp || 0) - (a.lastTimestamp || 0));
+
+        AppState.dmConversations = list;
+        AppState.unreadChatsCount = list.filter(c => c.unread).length;
+        updateChatDrawerBadge();
+
+        // Keep an already-open Chats list in sync live.
+        if (AppState.currentRoute === 'messages' && $('#dm-conversations-list')) {
+            loadDMConversations();
+        }
+    });
+
+    // --- Unread forum (group) messages ---
+    _groupsListRef = database.ref(`users/${uid}/groups`);
+    _groupsListRef.on('value', (snapshot) => {
+        const groupIds = Object.keys(snapshot.val() || {});
+        attachGroupUnreadListeners(uid, groupIds);
+    });
+}
+
+function stopRealtimeListeners() {
+    if (_notifRef) { _notifRef.off(); _notifRef = null; }
+    if (_dmIndexRef) { _dmIndexRef.off(); _dmIndexRef = null; }
+    if (_groupsListRef) { _groupsListRef.off(); _groupsListRef = null; }
+    Object.values(_groupMsgRefs).forEach(ref => ref.off());
+    _groupMsgRefs = {};
+    _notifKnownKeys = new Set();
+    AppState.unreadForumGroupIds = new Set();
+}
+
+function attachGroupUnreadListeners(uid, groupIds) {
+    // Drop listeners for groups the user is no longer part of.
+    Object.keys(_groupMsgRefs).forEach(gid => {
+        if (!groupIds.includes(gid)) {
+            _groupMsgRefs[gid].off();
+            delete _groupMsgRefs[gid];
+            AppState.unreadForumGroupIds.delete(gid);
+        }
+    });
+
+    groupIds.forEach(gid => {
+        if (_groupMsgRefs[gid]) return; // already listening
+        const ref = database.ref(`communityGroups/${gid}/messages`).orderByChild('timestamp').limitToLast(1);
+        _groupMsgRefs[gid] = ref;
+        ref.on('value', async (snap) => {
+            const latest = Object.values(snap.val() || {})[0];
+            if (!latest || latest.senderId === uid) {
+                AppState.unreadForumGroupIds.delete(gid);
+                updateForumDrawerBadge();
+                return;
+            }
+            try {
+                const readSnap = await database.ref(`users/${uid}/groupReads/${gid}`).once('value');
+                const lastRead = readSnap.val() || 0;
+                if (latest.timestamp > lastRead) {
+                    AppState.unreadForumGroupIds.add(gid);
+                } else {
+                    AppState.unreadForumGroupIds.delete(gid);
+                }
+            } catch (e) { /* ignore */ }
+            updateForumDrawerBadge();
+            if (AppState.currentRoute === 'community') renderCommunityPage();
+        });
+    });
+}
+
+function updateChatDrawerBadge() {
+    const badge = document.getElementById('drawer-badge-messages');
+    if (badge) badge.classList.toggle('hidden', !AppState.unreadChatsCount);
+}
+
+function updateForumDrawerBadge() {
+    const badge = document.getElementById('drawer-badge-community');
+    if (badge) badge.classList.toggle('hidden', !(AppState.unreadForumGroupIds && AppState.unreadForumGroupIds.size > 0));
 }
 
 /* ============================================
@@ -1675,6 +1817,14 @@ function initEventListeners() {
 
     // Profile / avatar button in top bar
     DOM.profileNavBtn.addEventListener('click', handleProfileNavClick);
+
+    // Keep track of scroll position per-route as the user scrolls, so
+    // navigateTo() can restore it later instead of always resetting to top.
+    if (DOM.pageContainer) {
+        DOM.pageContainer.addEventListener('scroll', () => {
+            AppState.scrollPositions[AppState.currentRoute] = DOM.pageContainer.scrollTop;
+        }, { passive: true });
+    }
     
     // Handle back/forward navigation. Closing overlays and navigating
     // between routes both consume a history entry, so the hardware/browser
@@ -1726,6 +1876,44 @@ function initEventListeners() {
     });
 }
 
+/**
+ * Builds the onclick action string for a notification row, routing
+ * Space-related notifications (amens/comments) to the actual post
+ * instead of always going to the sender's profile.
+ */
+function notifClickAction(notif) {
+    if (notif.postId && (notif.type === 'space_amen' || notif.type === 'space_comment')) {
+        const openComments = notif.type === 'space_comment';
+        return `closeSheet(); openSpacePostFromNotification('${notif.postId}', ${openComments})`;
+    }
+    if (notif.fromUid) {
+        const safeName = escapeHtml(notif.fromName || 'User').replace(/'/g, "\\'");
+        return `viewUserProfile('${notif.fromUid}', '${safeName}')`;
+    }
+    return '';
+}
+
+/**
+ * Jumps to Space and scrolls to a specific post (used when a notification
+ * about an amen or comment on the user's own post is tapped).
+ */
+async function openSpacePostFromNotification(postId, openComments) {
+    navigateTo('space');
+    // Space renders its feed asynchronously; wait a beat for the card to exist.
+    const tryFocus = (attemptsLeft) => {
+        const el = document.getElementById(`space-${postId}`);
+        if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.classList.add('space-card-flash');
+            setTimeout(() => el.classList.remove('space-card-flash'), 1500);
+            if (openComments) showSpacePostComments(postId);
+        } else if (attemptsLeft > 0) {
+            setTimeout(() => tryFocus(attemptsLeft - 1), 250);
+        }
+    };
+    setTimeout(() => tryFocus(8), 300);
+}
+
 async function showNotificationPanel() {
     if (!requireAuth('Sign in to view notifications.')) return;
 
@@ -1775,7 +1963,7 @@ async function showNotificationPanel() {
         ${generalNotifs.length > 0 ? `
             ${pendingRequests.length > 0 ? `<h4 style="font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-slate); margin-bottom: 8px;">Recent</h4>` : ''}
             ${generalNotifs.slice(-15).reverse().map(notif => `
-                <div class="p-2" style="border-bottom: 1px solid rgba(0,0,0,0.06); cursor:${notif.fromUid ? 'pointer' : 'default'};" ${notif.fromUid ? `onclick="viewUserProfile('${notif.fromUid}', '${escapeHtml(notif.fromName || 'User').replace(/'/g, "\\'")}')"` : ''}>
+                <div class="p-2" style="border-bottom: 1px solid rgba(0,0,0,0.06); cursor:${notif.postId || notif.fromUid ? 'pointer' : 'default'};" onclick="${notifClickAction(notif)}">
                     <div style="font-weight: ${notif.read ? '400' : '600'};">${escapeHtml(notif.message)}</div>
                     <div style="font-size: 12px; color: var(--text-slate);">${formatDate(notif.timestamp)}</div>
                 </div>
@@ -1814,12 +2002,11 @@ async function initApp() {
     // Initialize event listeners
     initEventListeners();
     
-    // Initialize authentication
+    // Initialize authentication (also determines and navigates to the
+    // initial route from the URL hash once auth state resolves — see
+    // initAuth()/enterAppOnce() in core.js).
     initAuth();
-    
-    // Initial route
-    const initialRoute = window.location.hash.replace('#/', '') || 'home';
-    
+
     console.log('✅ GraceGuide initialized successfully');
 }
 
@@ -1848,6 +2035,9 @@ window.triggerAvatarUpload = triggerAvatarUpload;
 window.postSelectedVersesToSpace = postSelectedVersesToSpace;
 window.showCreateSpacePostModal = showCreateSpacePostModal;
 window.showSpacePostComposer = showSpacePostComposer;
+window.backToSpacePostTypePicker = backToSpacePostTypePicker;
+window.addSpacePlanToMyPlanner = addSpacePlanToMyPlanner;
+window.openSpacePostFromNotification = openSpacePostFromNotification;
 window.submitTextSpacePost = submitTextSpacePost;
 window.submitVideoSpacePost = submitVideoSpacePost;
 window.submitNoteSpacePost = submitNoteSpacePost;

@@ -462,9 +462,10 @@ function discussReflectionWithShepherd() {
 /**
  * Builds a compact summary of the signed-in user's profile and app
  * activity so Shepherd can personalize its responses (e.g. reference
- * their current study plan, streak, or recent reading).
+ * their current study plan, streak, or recent reading) — including
+ * their activity in Space, Forum, Chats, and Notifications.
  */
-function buildShepherdUserContext() {
+async function buildShepherdUserContext() {
     if (!AppState.currentUser) {
         return 'The user is browsing as a guest (not signed in). Do not reference personal data that has not been shared in this conversation.';
     }
@@ -487,7 +488,68 @@ function buildShepherdUserContext() {
         `Prior Shepherd conversations saved: ${AppState.aiConversations.length}.`
     ];
 
+    // --- Space activity (fetched fresh so this works even if the user
+    // hasn't opened the Space tab yet this session) ---
+    const spaceSummary = await getSpaceSummaryForShepherd();
+    const streak = AppState.spaceStreak || { count: 0, lastPostDate: null };
+    const postedToday = streak.lastPostDate === (typeof getTodayDateString === 'function' ? getTodayDateString() : null);
+    lines.push(`Space posting streak: ${streak.count || 0} day(s)${postedToday ? ' (posted today)' : ''}.`);
+
+    if (spaceSummary) {
+        lines.push(`This user has posted ${spaceSummary.myPostsCount} time(s) to Space. Their posts have received ${spaceSummary.totalAmensReceived} total Amen(s) and ${spaceSummary.totalCommentsReceived} total comment(s).`);
+        if (spaceSummary.latestOwnPost) {
+            const p = spaceSummary.latestOwnPost;
+            const preview = p.type === 'video' ? (p.videoUrl || '') : (p.slides?.[0]?.text || p.planName || '');
+            lines.push(`Their most recent Space post (${formatDate(p.timestamp)}, type: ${p.type}): ${preview ? `"${truncate(preview, 90)}"` : '(no preview available)'}.`);
+        }
+        if (spaceSummary.recentTopics.length > 0) {
+            lines.push(`Topics currently active in the wider Space community feed: ${spaceSummary.recentTopics.join(', ')}.`);
+        }
+    } else {
+        lines.push('Space community feed data could not be loaded for this response.');
+    }
+
+    // --- Live indicators the user can currently see in the app ---
+    const unreadNotifs = AppState.notifications?.filter(n => !n.read).length || 0;
+    lines.push(`Unread notifications: ${unreadNotifs}. Unread direct-message chats: ${AppState.unreadChatsCount || 0}. Forum groups with new unread messages: ${AppState.unreadForumGroupIds?.size || 0}.`);
+
     return `Here is what you know about the signed-in user from the app, for personalizing your response. Only bring these details up when naturally relevant — don't recite this list back to them:\n${lines.join('\n')}`;
+}
+
+/**
+ * Pulls a lightweight snapshot of Space (the community devotional feed)
+ * for Shepherd's context: this user's own posting activity plus a sample
+ * of what topics are currently active community-wide. Reuses the feed
+ * already in memory if the user has visited Space this session; otherwise
+ * fetches a small sample fresh so Shepherd is never blind to Space.
+ */
+async function getSpaceSummaryForShepherd() {
+    if (!AppState.currentUser) return null;
+    try {
+        let posts = AppState.spacePosts;
+        if (!posts || posts.length === 0) {
+            const snapshot = await database.ref('spacePosts').orderByChild('timestamp').limitToLast(30).once('value');
+            posts = Object.values(snapshot.val() || {});
+        }
+
+        const uid = AppState.currentUser.uid;
+        const myPosts = posts.filter(p => p.authorId === uid);
+        const myPostsSorted = [...myPosts].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        const totalAmensReceived = myPosts.reduce((sum, p) => sum + Object.keys(p.amens || {}).length, 0);
+        const totalCommentsReceived = myPosts.reduce((sum, p) => sum + Object.keys(p.comments || {}).length, 0);
+        const recentTopics = [...new Set(posts.flatMap(p => p.tags || []))].slice(0, 8);
+
+        return {
+            myPostsCount: myPosts.length,
+            latestOwnPost: myPostsSorted[0] || null,
+            totalAmensReceived,
+            totalCommentsReceived,
+            recentTopics
+        };
+    } catch (error) {
+        console.error('Error building Space summary for Shepherd:', error);
+        return null;
+    }
 }
 
 /**
@@ -515,6 +577,19 @@ function detectCrisisKeywords(text) {
 async function callDeepSeekAI(message) {
     const systemPrompt = `You are Shepherd, the AI-powered Christian companion inside the GraceGuide app. You are knowledgeable, compassionate, and biblically grounded. You reference the Bible when appropriate, provide specific verses, explain biblical context, encourage personal Bible study, and maintain a conversational, warm tone while remaining respectful. You distinguish between what Scripture says and areas where Christians may have different interpretations. You never present personal opinions as biblical facts.
 
+App feature knowledge: you are fully aware of every part of GraceGuide and can explain, guide, or answer questions about any of them:
+- Bible: a full Bible reader (KJV, NLT, MSG, AMP) with bookmarking, highlighting, notes, and font size controls.
+- Shepherd: this AI chat itself — for questions, prayer, study help, and encouragement.
+- Space: a devotional social feed where users post testimonies/thoughts, notes, study plans, or video links as swipeable cards. Other users can react with "Amen" (like), comment, save, or share a post. Users build a daily posting streak (a flame counter) by posting at least once per day. Anyone can copy a shared study plan from Space straight into their own Study Planner via an "Add to My Study Plan" button.
+- Forum: topic-based group chats users can create or join to discuss faith, study, and life together.
+- Study Planner: day-by-day Bible reading plans (AI-generated or custom) with passages, topics, reflection questions, prayer points, progress tracking, and a completion streak.
+- Chats: one-to-one direct messaging, but only between "Brethren" — users who have sent and accepted a connection request on each other's profile. Has its own daily streak per conversation.
+- Notifications: a bell icon in the top bar shows Brethren requests and alerts for Amens/comments on the user's own Space posts, updating live.
+- Profile: username, bio, avatar, bookmarks, notes, and reading history; other users' public profiles can be viewed, connected with (Brethren), messaged once connected, reported, or blocked.
+- Talk to Someone: a page with resources for reaching a real person for support.
+- Settings: theme (light/dark), Bible version default, and account settings.
+If asked what something is, how to use it, or "how do I do X in the app", answer directly and practically using this knowledge — don't say you don't have access to app features.
+
 Formatting rules: Write in plain, natural sentences and short paragraphs. Do not use markdown symbols like **, ##, or bullet dashes, and do not use em dashes. If a list genuinely helps, write it as short plain sentences separated by line breaks instead of using markdown list syntax.
 
 Action rule: If, and only if, the user is clearly asking you to DO something the app can perform for them (create a study plan, post a verse or share something to Space, open a specific Bible passage, or save a note/prayer list as a downloadable file), end your reply with exactly one line in this exact machine-readable format and nothing after it:
@@ -529,7 +604,7 @@ Safety rule: If, and only if, the user's message describes suicidal thoughts, se
 §CRISIS§{"category":"suicide|self_harm|abuse|domestic_violence|severe_crisis","message":"one short compassionate sentence encouraging them to talk to a real person"}
 A §CRISIS§ line can appear together with or instead of an §ACTION§ line, each on its own line. Omit it entirely for ordinary conversations, including ordinary sadness, doubt, or struggle that isn't an acute safety crisis.`;
 
-    const userContext = buildShepherdUserContext();
+    const userContext = await buildShepherdUserContext();
 
     // Send recent conversation history so Shepherd has continuity within
     // this conversation, not just the latest message in isolation.
@@ -1755,7 +1830,13 @@ async function renderSpacePage() {
     `;
 
     await loadSpaceStreak();
-    $('#space-streak-slot').innerHTML = renderSpaceStreakBanner();
+    // Guard against the user having navigated to a different page while
+    // this was loading — otherwise the missing #space-streak-slot element
+    // throws and silently aborts before loadSpacePosts() ever runs.
+    if (AppState.currentRoute !== 'space') return;
+    const streakSlot = $('#space-streak-slot');
+    if (streakSlot) streakSlot.innerHTML = renderSpaceStreakBanner();
+
     await loadSpacePosts();
 }
 
@@ -1763,10 +1844,34 @@ async function loadSpacePosts() {
     const container = $('#space-feed');
     if (!container) return;
 
+    let posts;
     try {
+        // Primary path: ordered + limited query (needs a `timestamp` index).
         const snapshot = await database.ref('spacePosts').orderByChild('timestamp').limitToLast(60).once('value');
-        const posts = Object.values(snapshot.val() || {});
+        posts = Object.values(snapshot.val() || {});
+    } catch (error) {
+        console.error('Ordered Space query failed, falling back to a plain read:', error);
+        try {
+            // Fallback: some Firebase projects reject an unindexed orderByChild
+            // query for authenticated reads even though the same query is
+            // permitted for anonymous ones. A plain read has no such
+            // constraint — just sort/trim on the client instead.
+            const snapshot = await database.ref('spacePosts').once('value');
+            const all = Object.values(snapshot.val() || {});
+            posts = all.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).slice(0, 60);
+        } catch (fallbackError) {
+            console.error('Error loading Space posts:', fallbackError);
+            container.innerHTML = `
+                <div class="text-center" style="padding: 40px 20px;">
+                    <p class="text-muted" style="margin-bottom:12px;">Couldn't load Space right now.</p>
+                    <button class="btn btn-outline btn-sm" onclick="loadSpacePosts()"><i class="fas fa-rotate-right"></i> Retry</button>
+                </div>
+            `;
+            return;
+        }
+    }
 
+    try {
         if (posts.length === 0) {
             container.innerHTML = `
                 <div class="text-center" style="padding: 60px 20px;">
@@ -1800,11 +1905,28 @@ async function loadSpacePosts() {
         });
 
         AppState.spacePosts = ranked;
-        container.innerHTML = ranked.map(post => renderSpaceCard(post)).join('');
+
+        // Render each card in isolation — one malformed/legacy post record
+        // shouldn't be able to blank out the entire feed for everyone.
+        const cardsHTML = ranked.map(post => {
+            try {
+                return renderSpaceCard(post);
+            } catch (cardError) {
+                console.error('Skipping a Space post that failed to render:', post?.id, cardError);
+                return '';
+            }
+        }).join('');
+
+        container.innerHTML = cardsHTML || `<p class="text-center text-muted" style="padding: 40px 20px;">Space is quiet right now.</p>`;
         initSpaceCarouselObservers();
     } catch (error) {
-        console.error('Error loading Space posts:', error);
-        container.innerHTML = `<p class="text-center text-muted" style="padding: 40px 20px;">Couldn't load Space right now.</p>`;
+        console.error('Error rendering Space posts:', error);
+        container.innerHTML = `
+            <div class="text-center" style="padding: 40px 20px;">
+                <p class="text-muted" style="margin-bottom:12px;">Couldn't load Space right now.</p>
+                <button class="btn btn-outline btn-sm" onclick="loadSpacePosts()"><i class="fas fa-rotate-right"></i> Retry</button>
+            </div>
+        `;
     }
 }
 
@@ -1865,11 +1987,17 @@ function renderSpaceCard(post) {
         <button class="space-chapter-btn" onclick="openBibleChapter('${post.sourceBook.replace(/'/g, "\\'")}', ${post.sourceChapter})">
             <i class="fas fa-book-bible"></i> Read Full Chapter
         </button>
-    ` : (post.type === 'plan' ? `
+    ` : (post.type === 'plan' ? (
+        post.authorId === uid ? `
         <button class="space-chapter-btn" onclick="navigateTo('planner')">
             <i class="fas fa-calendar-check"></i> View Study Plan
         </button>
-    ` : '');
+    ` : (post.planData?.days?.length > 0 ? `
+        <button class="space-chapter-btn" onclick="addSpacePlanToMyPlanner('${post.id}')">
+            <i class="fas fa-plus"></i> Add to My Study Plan
+        </button>
+    ` : '')
+    ) : '');
 
     return `
         <div class="space-card" id="space-${post.id}">
@@ -1976,31 +2104,61 @@ function showCreateSpacePostModal(prefill) {
     showModal(modalContent);
 }
 
+const SPACE_POST_TYPE_LABELS = {
+    text: 'Testimony / Thought',
+    note: 'Share a Note',
+    plan: 'Share a Study Plan',
+    video: 'Video Link'
+};
+
+/**
+ * Shows the composer for a chosen post type as its own standalone view —
+ * the type picker is hidden while composing so the textbox/list has the
+ * full modal to itself, with a Back link to return to the picker.
+ */
 function showSpacePostComposer(kind) {
+    const picker = $('#space-post-type-picker');
     const slot = $('#space-post-composer');
     if (!slot) return;
 
+    if (picker) picker.style.display = 'none';
+
+    const backBtn = `
+        <button class="btn btn-sm" style="background:none; border:none; padding:0; margin-bottom:14px; color:var(--text-slate); display:inline-flex; align-items:center; gap:6px; cursor:pointer;" onclick="backToSpacePostTypePicker()">
+            <i class="fas fa-arrow-left"></i> Back
+        </button>
+    `;
+    const heading = `<h4 style="margin-bottom:12px;">${SPACE_POST_TYPE_LABELS[kind] || ''}</h4>`;
+
     if (kind === 'text') {
         slot.innerHTML = `
+            ${backBtn}
+            ${heading}
             <div class="form-group">
-                <textarea id="space-text-input" class="form-textarea" rows="4" placeholder="Share a testimony, thought, or encouragement..."></textarea>
+                <textarea id="space-text-input" class="form-textarea" rows="7" placeholder="Share a testimony, thought, or encouragement..."></textarea>
             </div>
             <button class="btn btn-primary btn-block" onclick="submitTextSpacePost()">Post</button>
         `;
+        setTimeout(() => $('#space-text-input')?.focus(), 50);
     } else if (kind === 'video') {
         slot.innerHTML = `
+            ${backBtn}
+            ${heading}
             <div class="form-group">
                 <input type="url" id="space-video-input" class="form-input" placeholder="https://youtube.com/... or https://x.com/...">
             </div>
             <button class="btn btn-primary btn-block" onclick="submitVideoSpacePost()">Post</button>
         `;
+        setTimeout(() => $('#space-video-input')?.focus(), 50);
     } else if (kind === 'note') {
         if (AppState.notes.length === 0) {
-            slot.innerHTML = `<p class="text-muted text-center">You have no notes yet — add one from the Bible reader.</p>`;
+            slot.innerHTML = `${backBtn}${heading}<p class="text-muted text-center">You have no notes yet — add one from the Bible reader.</p>`;
             return;
         }
         slot.innerHTML = `
-            <div style="display:grid; gap:8px; max-height:220px; overflow-y:auto;">
+            ${backBtn}
+            ${heading}
+            <div style="display:grid; gap:8px; max-height:50vh; overflow-y:auto;">
                 ${AppState.notes.map((note, i) => `
                     <button class="btn btn-outline btn-block" style="text-align:left;" onclick="submitNoteSpacePost(${i})">
                         <div style="font-weight:600;">${escapeHtml(note.reference || 'Note')}</div>
@@ -2011,17 +2169,26 @@ function showSpacePostComposer(kind) {
         `;
     } else if (kind === 'plan') {
         if (AppState.plannerData.length === 0) {
-            slot.innerHTML = `<p class="text-muted text-center">You have no study plans yet.</p>`;
+            slot.innerHTML = `${backBtn}${heading}<p class="text-muted text-center">You have no study plans yet.</p>`;
             return;
         }
         slot.innerHTML = `
-            <div style="display:grid; gap:8px;">
+            ${backBtn}
+            ${heading}
+            <div style="display:grid; gap:8px; max-height:50vh; overflow-y:auto;">
                 ${AppState.plannerData.map((plan, i) => `
                     <button class="btn btn-outline btn-block" onclick="submitPlanSpacePost(${i})">${escapeHtml(plan.name || plan.title || plan.planType || 'Study Plan')}</button>
                 `).join('')}
             </div>
         `;
     }
+}
+
+function backToSpacePostTypePicker() {
+    const picker = $('#space-post-type-picker');
+    const slot = $('#space-post-composer');
+    if (picker) picker.style.display = '';
+    if (slot) slot.innerHTML = '';
 }
 
 async function submitCreateSpacePost(fields) {
@@ -2085,8 +2252,53 @@ function submitPlanSpacePost(index) {
         type: 'plan',
         slides: [{ kind: 'text', label: 'Study Plan', text: name }],
         planName: name,
+        // Full day-by-day content so other users can add this plan to
+        // their own Study Planner straight from Space, not just view the name.
+        planData: {
+            name,
+            days: (plan.days || []).map(d => ({ passage: d.passage, topic: d.topic, date: d.date }))
+        },
         tags: extractTags(name)
     });
+}
+
+/**
+ * Lets any signed-in user copy a study plan they see on Space into their
+ * own Study Planner. Resets completion/progress so it starts fresh for them.
+ */
+async function addSpacePlanToMyPlanner(postId) {
+    if (!requireAuth('Sign in to add this study plan.', () => addSpacePlanToMyPlanner(postId))) return;
+
+    const post = AppState.spacePosts.find(p => p.id === postId) || AppState.spacePosts.find(p => p.id === postId);
+    const planData = post?.planData;
+    if (!planData || !Array.isArray(planData.days) || planData.days.length === 0) {
+        showToast("This study plan doesn't have day-by-day content to copy.", 'warning');
+        return;
+    }
+
+    const newPlan = {
+        id: generateId(),
+        name: planData.name || 'Study Plan',
+        days: planData.days.map(d => ({ ...d, completed: false })),
+        progress: 0,
+        streak: 0,
+        completed: 0,
+        total: planData.days.length,
+        createdAt: Date.now()
+    };
+
+    AppState.plannerData.push(newPlan);
+    AppState.currentPlan = newPlan;
+
+    try {
+        const uid = AppState.currentUser.uid;
+        await database.ref(`users/${uid}/planner`).set(AppState.plannerData);
+        showToast('Added to your Study Planner!', 'success');
+        navigateTo('planner');
+    } catch (error) {
+        showToast('Failed to add study plan', 'error');
+        console.error(error);
+    }
 }
 
 /* ---- Reactions, comments, delete, share ---- */
@@ -2107,6 +2319,18 @@ async function toggleSpaceAmen(postId) {
             if (post) { post.amens = post.amens || {}; post.amens[uid] = true; }
             (post?.tags || []).forEach(tag => recordInterestSignal('tag', tag, 1));
             if (post?.sourceBook) recordInterestSignal('book', post.sourceBook, 1);
+
+            // Let the post's author know — but not when they Amen their own post.
+            if (post && post.authorId && post.authorId !== uid && typeof addNotification === 'function') {
+                const myName = AppState.userProfile?.username || 'Anonymous';
+                addNotification(post.authorId, {
+                    type: 'space_amen',
+                    fromUid: uid,
+                    fromName: myName,
+                    postId,
+                    message: `${myName} said Amen to your Space post`
+                });
+            }
         }
         updateSpaceCardDOM(postId);
     } catch (error) {
@@ -2188,6 +2412,17 @@ async function submitSpacePostComment(postId) {
         if (post) { post.comments = post.comments || {}; post.comments[commentId] = comment; }
 
         extractTags(content).forEach(tag => recordInterestSignal('tag', tag, 1.5));
+
+        // Let the post's author know — but not when they comment on their own post.
+        if (post && post.authorId && post.authorId !== AppState.currentUser.uid && typeof addNotification === 'function') {
+            addNotification(post.authorId, {
+                type: 'space_comment',
+                fromUid: AppState.currentUser.uid,
+                fromName: comment.authorName,
+                postId,
+                message: `${comment.authorName} commented on your Space post`
+            });
+        }
 
         showSpacePostComments(postId);
         updateSpaceCardDOM(postId);

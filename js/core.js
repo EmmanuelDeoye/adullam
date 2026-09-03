@@ -52,7 +52,10 @@ const AppState = {
     currentDMUserName: null,
     spacePosts: [],
     interestProfile: null,
-    spaceStreak: { count: 0, lastPostDate: null }
+    spaceStreak: { count: 0, lastPostDate: null },
+    scrollPositions: {},
+    unreadChatsCount: 0,
+    unreadForumGroupIds: new Set()
 };
 
 /* ============================================
@@ -281,6 +284,13 @@ function initAuth() {
     const SPLASH_TIMEOUT_MS = 6000;
     let settled = false;
 
+    // Known routes that can legitimately be deep-linked / restored on
+    // launch. Anything else (or missing) falls back to the default tab
+    // instead of forcing everyone onto Shepherd every time the app opens.
+    const VALID_INITIAL_ROUTES = ['home', 'bible', 'ask', 'space', 'community', 'planner', 'messages', 'profile', 'settings', 'talk-to-someone'];
+    const hashRoute = window.location.hash.replace('#/', '');
+    const initialRoute = VALID_INITIAL_ROUTES.includes(hashRoute) ? hashRoute : 'ask';
+
     const enterAppOnce = (isTimeout) => {
         if (settled) return;
         settled = true;
@@ -288,7 +298,7 @@ function initAuth() {
         updateProfileNavIcon();
         updateDrawerAuthButton();
         showMainApp();
-        navigateTo('ask', { replace: true });
+        navigateTo(initialRoute, { replace: true });
         if (isTimeout) {
             showToast("Taking longer than usual to connect — you're browsing as a guest for now.", 'warning');
         }
@@ -304,6 +314,7 @@ function initAuth() {
                     await loadUserProfile(user.uid);
                     await loadUserData();
                 } else {
+                    if (typeof stopRealtimeListeners === 'function') stopRealtimeListeners();
                     AppState.currentUser = null;
                     AppState.userProfile = null;
                     AppState.bookmarks = [];
@@ -313,6 +324,13 @@ function initAuth() {
                     AppState.plannerData = [];
                     AppState.userConnections = new Map();
                     AppState.aiConversations = [];
+                    AppState.notifications = [];
+                    AppState.dmConversations = [];
+                    AppState.unreadChatsCount = 0;
+                    AppState.unreadForumGroupIds = new Set();
+                    if (typeof updateNotificationBadge === 'function') updateNotificationBadge();
+                    if (typeof updateChatDrawerBadge === 'function') updateChatDrawerBadge();
+                    if (typeof updateForumDrawerBadge === 'function') updateForumDrawerBadge();
                     if (typeof loadInterestProfile === 'function') await loadInterestProfile();
                 }
 
@@ -403,8 +421,9 @@ async function loadUserData() {
         console.error('Error loading user data:', error);
     }
     
-    // Load notifications
-    loadNotifications();
+    // Start realtime listeners (notifications, chat unread, forum unread) —
+    // these update live via Firebase's .on('value'), no refresh needed.
+    if (typeof startRealtimeListeners === 'function') startRealtimeListeners();
     // Load the personalization profile (books/tags of interest)
     if (typeof loadInterestProfile === 'function') loadInterestProfile();
 }
@@ -749,12 +768,25 @@ function updateDrawerAuthButton() {
 
 function handleDrawerAuthButtonClick() {
     if (AppState.currentUser) return;
-    closeDrawer();
+    // Deliberately NOT calling closeDrawer() here: closeDrawer() unwinds
+    // its own history entry via history.back(), which is asynchronous.
+    // Immediately pushing a new history entry for the auth modal right
+    // after that (as showAuthModal/showModal does) races with the pending
+    // back() navigation — the eventual back() lands on the freshly-pushed
+    // modal entry instead of the drawer entry, closing the modal the
+    // instant it opens. Closing the drawer visually without touching
+    // history sidesteps the race; the modal's own pushState still gives
+    // the hardware back button correct behavior.
+    DOM.drawer.classList.remove('open');
+    DOM.drawerOverlay.classList.remove('show');
+    DOM.drawerOverlay.classList.add('hidden');
+    AppState.drawerOpen = false;
     showAuthModal({ message: 'Sign in to your GraceGuide account.' });
 }
 
 function handleLogout() {
     auth.signOut().then(() => {
+        if (typeof stopRealtimeListeners === 'function') stopRealtimeListeners();
         AppState.currentUser = null;
         AppState.userProfile = null;
         showToast('Signed out successfully', 'success');
@@ -777,6 +809,13 @@ function navigateTo(route, options = {}) {
     if (AppState.sheetOpen) closeSheet(true);
     if (AppState.drawerOpen) closeDrawer(true);
 
+    // Remember where the user was scrolled to on the page they're leaving,
+    // so coming back to it later (or a same-route refresh, e.g. after
+    // signing in) doesn't yank them back up to the top.
+    if (DOM.pageContainer && AppState.currentRoute) {
+        AppState.scrollPositions[AppState.currentRoute] = DOM.pageContainer.scrollTop;
+    }
+
     AppState.currentRoute = route;
     updateNavigation(route);
 
@@ -791,52 +830,64 @@ function navigateTo(route, options = {}) {
         }
     }
 
+    let renderResult;
     switch(route) {
         case 'home':
-            renderHomePage();
+            renderResult = renderHomePage();
             break;
         case 'bible':
-            renderBiblePage();
+            renderResult = renderBiblePage();
             break;
         case 'ask':
-            renderAskPage();
+            renderResult = renderAskPage();
             break;
         case 'community':
-            renderCommunityPage();
+            renderResult = renderCommunityPage();
             break;
         case 'planner':
-            renderPlannerPage();
+            renderResult = renderPlannerPage();
             break;
         case 'space':
-            renderSpacePage();
+            renderResult = renderSpacePage();
             break;
         case 'messages':
-            renderMessagesPage();
+            renderResult = renderMessagesPage();
             break;
         case 'group-chat':
-            renderGroupChatPage();
+            renderResult = renderGroupChatPage();
             break;
         case 'dm-thread':
-            renderDMThreadPage();
+            renderResult = renderDMThreadPage();
             break;
         case 'profile':
-            renderProfilePage();
+            renderResult = renderProfilePage();
             break;
         case 'settings':
-            renderSettingsPage();
+            renderResult = renderSettingsPage();
             break;
         case 'talk-to-someone':
-            renderTalkToSomeonePage();
+            renderResult = renderTalkToSomeonePage();
             break;
         case 'view-profile':
-            renderViewProfilePage();
+            renderResult = renderViewProfilePage();
             break;
         default:
-            renderHomePage();
+            renderResult = renderHomePage();
     }
-    
-    // Scroll to top
-    DOM.pageContainer.scrollTop = 0;
+
+    // Restore this page's last scroll position once its content has
+    // actually finished rendering (many pages render a skeleton first,
+    // then fill in real content after an async fetch — restoring too
+    // early gets clamped back to 0 by the shorter skeleton). Brand-new
+    // pages simply have no saved position yet, so they naturally open
+    // at the top.
+    Promise.resolve(renderResult).then(() => {
+        requestAnimationFrame(() => {
+            if (AppState.currentRoute === route && DOM.pageContainer) {
+                DOM.pageContainer.scrollTop = AppState.scrollPositions[route] || 0;
+            }
+        });
+    });
 
     // The "add post" button only makes sense on the Space page.
     if (DOM.spaceAddBtn) DOM.spaceAddBtn.classList.toggle('hidden', route !== 'space');
@@ -937,9 +988,7 @@ async function renderHomePage() {
                 <button class="btn btn-secondary btn-sm" onclick="navigateTo('bible')">
                     <i class="fas fa-book-bible"></i> Read Bible
                 </button>
-                <button class="btn btn-accent btn-sm" onclick="navigateTo('ask')">
-                    <i class="fas fa-dove"></i> Ask Shepherd
-                </button>
+                
                 <button class="btn btn-gold btn-sm" onclick="navigateTo('planner')">
                     <i class="fas fa-calendar-check"></i> Study Planner
                 </button>
