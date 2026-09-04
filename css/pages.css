@@ -430,6 +430,169 @@
     width: 100%;
 }
 
+.bible-back-btn {
+    flex-shrink: 0;
+}
+
+.bible-section-title {
+    font-size: var(--text-sm);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-slate);
+    margin: var(--spacing-lg) 0 var(--spacing-sm);
+}
+
+.bible-section-title:first-of-type {
+    margin-top: 0;
+}
+
+.bible-book-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--spacing-sm);
+    margin-bottom: var(--spacing-md);
+}
+
+@media (max-width: 480px) {
+    .bible-book-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+.bible-book-card {
+    padding: var(--spacing-md) var(--spacing-sm);
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: var(--radius-md);
+    background: var(--card-white);
+    color: var(--text-charcoal);
+    font-family: var(--font-primary);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    text-align: center;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.bible-book-card:hover {
+    background: rgba(48,72,58,0.06);
+    border-color: var(--primary-deep-olive);
+}
+
+.bible-book-card:active {
+    transform: scale(0.97);
+}
+
+[data-theme="dark"] .bible-book-card {
+    background: var(--dark-card);
+    border-color: var(--dark-border);
+    color: var(--dark-text);
+}
+
+.bible-chapter-list-title {
+    font-family: var(--font-display);
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    margin-bottom: var(--spacing-md);
+}
+
+.bible-chapter-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: var(--spacing-sm);
+}
+
+@media (max-width: 480px) {
+    .bible-chapter-grid {
+        grid-template-columns: repeat(5, 1fr);
+    }
+}
+
+.bible-chapter-card {
+    aspect-ratio: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(0,0,0,0.08);
+    border-radius: var(--radius-md);
+    background: var(--card-white);
+    color: var(--text-charcoal);
+    font-family: var(--font-primary);
+    font-size: var(--text-base);
+    font-weight: 700;
+    cursor: pointer;
+    transition: background var(--transition-fast), border-color var(--transition-fast), transform var(--transition-fast);
+}
+
+.bible-chapter-card:hover {
+    background: rgba(48,72,58,0.06);
+    border-color: var(--primary-deep-olive);
+}
+
+.bible-chapter-card:active {
+    transform: scale(0.94);
+}
+
+[data-theme="dark"] .bible-chapter-card {
+    background: var(--dark-card);
+    border-color: var(--dark-border);
+    color: var(--dark-text);
+}
+
+.bible-breadcrumb {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: var(--text-xs);
+    color: var(--text-slate);
+    margin-bottom: var(--spacing-md);
+    flex-wrap: wrap;
+}
+
+.bible-breadcrumb button {
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--text-slate);
+    font-family: var(--font-primary);
+    font-size: var(--text-xs);
+    cursor: pointer;
+    text-decoration: underline;
+}
+
+.bible-breadcrumb span {
+    color: var(--text-charcoal);
+    font-weight: 600;
+}
+
+[data-theme="dark"] .bible-breadcrumb span {
+    color: var(--dark-text);
+}
+
+.verse-jump-inline {
+    display: flex;
+    gap: 6px;
+    margin-bottom: var(--spacing-lg);
+    max-width: 220px;
+}
+
+.verse-jump-inline input {
+    width: 100%;
+    min-width: 0;
+    padding: var(--spacing-sm);
+    border: 1px solid rgba(0,0,0,0.12);
+    border-radius: var(--radius-md);
+    font-family: var(--font-primary);
+    font-size: var(--text-sm);
+    background: var(--card-white);
+    color: var(--text-charcoal);
+}
+
+[data-theme="dark"] .verse-jump-inline input {
+    border-color: var(--dark-border);
+    background: var(--dark-card);
+    color: var(--dark-text);
+}
+
 .verse-jump {
     display: flex;
     gap: 4px;
@@ -487,7 +650,25 @@
 }
 
 .bible-verse.selected {
-    background: rgba(48,72,58,0.1);
+    background: rgba(48,72,58,0.16);
+    box-shadow: inset 0 0 0 1.5px var(--primary-deep-olive);
+}
+
+.bible-verse.highlighted {
+    background: rgba(199,166,90,0.22);
+}
+
+.bible-verse.highlighted.selected {
+    background: rgba(199,166,90,0.34);
+}
+
+.bible-verse-bookmark-icon {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    font-size: 11px;
+    color: var(--accent-terracotta);
+    opacity: 0.85;
 }
 
 .verse-number {
@@ -496,6 +677,94 @@
     margin-right: var(--spacing-sm);
     font-size: var(--text-xs);
     vertical-align: super;
+}
+
+/* ---- Floating multi-verse selection bar ----
+   Appended to <body> (not the page container) so it floats above the
+   bottom nav without ever covering/blocking the verse list itself —
+   that's what lets the user keep tapping additional verses while it's
+   showing. */
+.verse-select-bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: calc(var(--bottom-nav-height) + env(safe-area-inset-bottom));
+    z-index: 150;
+    background: var(--card-white);
+    border-top: 1px solid rgba(0,0,0,0.08);
+    box-shadow: 0 -4px 16px rgba(0,0,0,0.08);
+    padding: var(--spacing-sm) var(--spacing-md);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--spacing-sm);
+    animation: slideUp 0.2s ease-out;
+}
+
+[data-theme="dark"] .verse-select-bar {
+    background: var(--dark-card);
+    border-top-color: var(--dark-border);
+}
+
+.verse-select-info {
+    font-size: var(--text-xs);
+    color: var(--text-slate);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.verse-select-info strong {
+    color: var(--text-charcoal);
+    font-size: var(--text-sm);
+}
+
+[data-theme="dark"] .verse-select-info strong {
+    color: var(--dark-text);
+}
+
+.verse-select-ref {
+    display: block;
+    font-size: 10px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.verse-select-actions {
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+}
+
+.vsb-btn {
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: var(--radius-full);
+    background: rgba(48,72,58,0.08);
+    color: var(--primary-deep-olive);
+    cursor: pointer;
+    font-size: 14px;
+    transition: background var(--transition-fast);
+}
+
+.vsb-btn:hover {
+    background: rgba(48,72,58,0.16);
+}
+
+.vsb-btn.vsb-close {
+    background: rgba(200,117,82,0.12);
+    color: var(--accent-terracotta);
+}
+
+[data-theme="dark"] .vsb-btn {
+    background: rgba(255,255,255,0.08);
+    color: var(--dark-text);
 }
 
 .bible-text {
