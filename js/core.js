@@ -13,9 +13,15 @@ const AppState = {
     userProfile: null,
     currentRoute: 'home',
     currentTheme: 'light',
-    bibleVersion: 'KJV',
+    // Persisted so the last translation the user picked (KJV/NLT/MSG/AMP)
+    // stays selected across reloads instead of always resetting to KJV.
+    bibleVersion: localStorage.getItem('graceguide_bible_version') || 'KJV',
     currentChapter: null,
     currentBook: null,
+    // Which level of the Bible tab is showing: 'books' (grid of 66 books),
+    // 'chapters' (grid of chapter numbers for the chosen book), or
+    // 'reader' (the actual chapter text). null = not yet decided.
+    bibleView: null,
     selectedVerses: new Set(),
     plannerData: [],
     notifications: [],
@@ -804,6 +810,14 @@ function navigateTo(route, options = {}) {
     // Stop any Shepherd voice playback before leaving/changing pages
     if (typeof stopSpeaking === 'function') stopSpeaking();
 
+    // Leaving the Bible tab (or re-navigating to a different route while a
+    // verse multi-selection is active) should clear the floating
+    // selection bar so it doesn't linger over an unrelated page.
+    if (route !== 'bible' && AppState.selectedVerses.size > 0) {
+        AppState.selectedVerses.clear();
+        clearVerseSelectionBar();
+    }
+
     // Close any open overlays first (they manage their own history entries)
     if (AppState.modalOpen) closeModal(true);
     if (AppState.sheetOpen) closeSheet(true);
@@ -874,6 +888,11 @@ function navigateTo(route, options = {}) {
         default:
             renderResult = renderHomePage();
     }
+
+    // Exposed so callers that just called navigateTo() (e.g.
+    // openBibleChapter jumping to a chapter for the first time) can await
+    // the page's own async render/fetch work if they need to.
+    AppState.lastRenderPromise = Promise.resolve(renderResult);
 
     // Restore this page's last scroll position once its content has
     // actually finished rendering (many pages render a skeleton first,
@@ -1168,107 +1187,209 @@ function parsePassageReference(passage) {
     return { book, chapter, verse };
 }
 
+/**
+ * Entry point registered by the router for the "bible" route. Decides
+ * which of the three navigation levels to show:
+ *   1. Books  — grid of all 66 books (Old + New Testament)
+ *   2. Chapters — grid of chapter numbers for the chosen book
+ *   3. Reader — the actual chapter text
+ * This replaces the old dropdown-based navigation with a tap-through
+ * flow (book → chapter → reader), and it deliberately does NOT fetch
+ * anything from api.bible until the user picks an exact chapter — every
+ * screen before that is free, which is the whole point: it stops the
+ * app from pulling data it doesn't need yet and burning API calls.
+ */
 function renderBiblePage() {
+    clearVerseSelectionBar();
+    if (AppState.bibleView === 'reader' && AppState.currentBook && AppState.currentChapter) {
+        return renderBibleReaderView(AppState.currentBook, AppState.currentChapter);
+    } else if (AppState.bibleView === 'chapters' && AppState.currentBook) {
+        renderBibleChapterListView(AppState.currentBook);
+    } else if (AppState.bibleView === null && AppState.readingHistory.length > 0) {
+        // First time opening the Bible tab this session — resume exactly
+        // where the user left off instead of forcing them back through
+        // the book list every time.
+        const lastRead = AppState.readingHistory[AppState.readingHistory.length - 1];
+        if (lastRead && lastRead.book && lastRead.chapter) {
+            return renderBibleReaderView(lastRead.book, lastRead.chapter);
+        }
+        renderBibleBookListView();
+    } else {
+        renderBibleBookListView();
+    }
+}
+
+/**
+ * Shared header used at all three navigation levels: translation
+ * picker, search, and (in the reader) bookmark/font controls, plus a
+ * back button whenever we're not at the top level.
+ */
+function bibleTopBarHTML(context) {
+    let backBtn = '';
+    if (context === 'chapters') {
+        backBtn = `<button class="icon-btn bible-back-btn" onclick="renderBibleBookListView()" aria-label="Back to books"><i class="fas fa-chevron-left"></i></button>`;
+    } else if (context === 'reader') {
+        const book = (AppState.currentBook || '').replace(/'/g, "\\'");
+        backBtn = `<button class="icon-btn bible-back-btn" onclick="renderBibleChapterListView('${book}')" aria-label="Back to chapters"><i class="fas fa-chevron-left"></i></button>`;
+    }
+
+    return `
+        <div class="bible-header">
+            <div style="display: flex; gap: 8px; align-items: center;">
+                ${backBtn}
+                <select id="bible-version-select" class="form-select" style="min-width: 110px;">
+                    ${AppState.cachedBibleVersions.map(v => `<option value="${v}" ${v === AppState.bibleVersion ? 'selected' : ''}>${v}</option>`).join('')}
+                </select>
+                <button id="search-bible-btn" class="btn btn-outline btn-sm" aria-label="Search">
+                    <i class="fas fa-search"></i>
+                </button>
+            </div>
+            <div style="display: flex; gap: 8px;">
+                ${context === 'reader' ? `
+                    <button id="bookmark-chapter-btn" class="btn btn-outline btn-sm" aria-label="Bookmark chapter">
+                        <i class="fas fa-bookmark"></i>
+                    </button>
+                ` : ''}
+                <button id="font-size-btn" class="btn btn-outline btn-sm" aria-label="Font size">
+                    <i class="fas fa-font"></i>
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+function bindBibleTopBarEvents(context) {
+    $('#bible-version-select').addEventListener('change', (e) => {
+        AppState.bibleVersion = e.target.value;
+        // Persist so the choice survives a reload instead of resetting to KJV.
+        localStorage.setItem('graceguide_bible_version', e.target.value);
+        showToast(`Bible version set to ${e.target.value}`, 'success');
+        if (context === 'reader' && AppState.currentBook && AppState.currentChapter) {
+            loadBibleChapter(AppState.currentBook, AppState.currentChapter);
+        }
+    });
+
+    $('#search-bible-btn').addEventListener('click', showSearchModal);
+    $('#font-size-btn').addEventListener('click', showFontSizeOptions);
+
+    const bookmarkBtn = $('#bookmark-chapter-btn');
+    if (bookmarkBtn) {
+        bookmarkBtn.addEventListener('click', () => {
+            if (AppState.currentBook && AppState.currentChapter) {
+                bookmarkChapter(AppState.currentBook, AppState.currentChapter);
+            }
+        });
+    }
+}
+
+/* ---- Level 1: Book grid ---- */
+function renderBibleBookListView() {
+    AppState.bibleView = 'books';
+    AppState.currentBook = null;
+    AppState.currentChapter = null;
+
+    const books = getBibleBooks();
+    const oldTestament = books.slice(0, 39);
+    const newTestament = books.slice(39);
+
+    const bookCard = (book) => `<button class="bible-book-card" onclick="openBibleBook('${book.replace(/'/g, "\\'")}')">${book}</button>`;
+
     DOM.pageContainer.innerHTML = `
         <div class="bible-reader">
-            <div class="bible-header">
-                <div style="display: flex; gap: 8px; align-items: center;">
-                    <select id="bible-version-select" class="form-select" style="min-width: 140px;">
-                        ${AppState.cachedBibleVersions.map(v => `<option value="${v}" ${v === AppState.bibleVersion ? 'selected' : ''}>${v} — ${BIBLE_VERSION_LABELS[v] || v}</option>`).join('')}
-                    </select>
-                    <button id="search-bible-btn" class="btn btn-outline btn-sm">
-                        <i class="fas fa-search"></i> Search
-                    </button>
-                </div>
-                <div style="display: flex; gap: 8px;">
-                    <button id="bookmark-chapter-btn" class="btn btn-outline btn-sm">
-                        <i class="fas fa-bookmark"></i> Bookmark
-                    </button>
-                    <button id="font-size-btn" class="btn btn-outline btn-sm">
-                        <i class="fas fa-font"></i> Font
-                    </button>
-                </div>
+            ${bibleTopBarHTML('books')}
+            <h4 class="bible-section-title">Old Testament</h4>
+            <div class="bible-book-grid">${oldTestament.map(bookCard).join('')}</div>
+            <h4 class="bible-section-title">New Testament</h4>
+            <div class="bible-book-grid">${newTestament.map(bookCard).join('')}</div>
+        </div>
+    `;
+    bindBibleTopBarEvents('books');
+}
+
+function openBibleBook(book) {
+    renderBibleChapterListView(book);
+}
+
+/* ---- Level 2: Chapter grid ---- */
+function renderBibleChapterListView(book) {
+    AppState.bibleView = 'chapters';
+    AppState.currentBook = book;
+    AppState.currentChapter = null;
+
+    const total = getBookChapterCount(book);
+    const chapterCard = (n) => `<button class="bible-chapter-card" onclick="openBibleChapterFromGrid('${book.replace(/'/g, "\\'")}', ${n})">${n}</button>`;
+
+    DOM.pageContainer.innerHTML = `
+        <div class="bible-reader">
+            ${bibleTopBarHTML('chapters')}
+            <h3 class="bible-chapter-list-title">${escapeHtml(book)}</h3>
+            <div class="bible-chapter-grid">
+                ${Array.from({ length: total }, (_, i) => i + 1).map(chapterCard).join('')}
+            </div>
+        </div>
+    `;
+    bindBibleTopBarEvents('chapters');
+}
+
+function openBibleChapterFromGrid(book, chapter) {
+    renderBibleReaderView(book, chapter);
+}
+
+/* ---- Level 3: Chapter reader ---- */
+function renderBibleReaderView(book, chapter) {
+    AppState.bibleView = 'reader';
+    AppState.currentBook = book;
+    AppState.currentChapter = chapter;
+
+    const total = getBookChapterCount(book);
+    const safeBook = book.replace(/'/g, "\\'");
+
+    DOM.pageContainer.innerHTML = `
+        <div class="bible-reader">
+            ${bibleTopBarHTML('reader')}
+            <div class="bible-breadcrumb">
+                <button onclick="renderBibleBookListView()">Books</button>
+                <i class="fas fa-chevron-right"></i>
+                <button onclick="renderBibleChapterListView('${safeBook}')">${escapeHtml(book)}</button>
+                <i class="fas fa-chevron-right"></i>
+                <span>${chapter}</span>
+            </div>
+            <div class="verse-jump-inline">
+                <input type="number" id="bible-verse-jump" min="1" placeholder="Go to verse">
+                <button id="verse-jump-btn" class="btn btn-outline btn-sm">Go</button>
             </div>
 
-            <div class="bible-nav-picker">
-                <select id="bible-book-select" class="form-select">
-                    <option value="">Book</option>
-                    ${getBibleBooks().map(book => `<option value="${book}">${book}</option>`).join('')}
-                </select>
-                <select id="bible-chapter-select" class="form-select" disabled>
-                    <option value="">Chapter</option>
-                </select>
-                <div class="verse-jump">
-                    <input type="number" id="bible-verse-jump" min="1" placeholder="Verse" disabled>
-                    <button id="verse-jump-btn" class="btn btn-outline btn-sm" disabled>Go</button>
-                </div>
-            </div>
-            
             <div id="bible-content" style="min-height: 400px;">
-                <div class="text-center text-muted" style="padding: 60px 20px;">
-                    <i class="fas fa-book-bible" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
-                    <h3 style="margin-bottom: 8px;">Select a Book</h3>
-                    <p>Choose a book, chapter, and verse above to start reading.</p>
-                </div>
+                <div class="skeleton" style="height: 40px; margin-bottom: 16px;"></div>
+                <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
+                <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
+                <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
             </div>
-            
-            <div id="chapter-navigation" class="flex justify-between mt-3" style="display: none;">
-                <button id="prev-chapter-btn" class="btn btn-outline btn-sm">
+
+            <div id="chapter-navigation" class="flex justify-between mt-3">
+                <button id="prev-chapter-btn" class="btn btn-outline btn-sm" ${chapter <= 1 ? 'disabled' : ''}>
                     <i class="fas fa-chevron-left"></i> Previous
                 </button>
-                <span id="chapter-indicator" style="font-weight: 600;"></span>
-                <button id="next-chapter-btn" class="btn btn-outline btn-sm">
+                <span id="chapter-indicator" style="font-weight: 600;">${escapeHtml(book)} ${chapter}</span>
+                <button id="next-chapter-btn" class="btn btn-outline btn-sm" ${chapter >= total ? 'disabled' : ''}>
                     Next <i class="fas fa-chevron-right"></i>
                 </button>
             </div>
         </div>
     `;
 
-    const bookSelect = $('#bible-book-select');
-    const chapterSelect = $('#bible-chapter-select');
-    const verseInput = $('#bible-verse-jump');
-    const verseJumpBtn = $('#verse-jump-btn');
+    bindBibleTopBarEvents('reader');
 
-    function populateChapters(book, selectedChapter = 1) {
-        const total = getBookChapterCount(book);
-        chapterSelect.innerHTML = Array.from({ length: total }, (_, i) => i + 1)
-            .map(n => `<option value="${n}" ${n === selectedChapter ? 'selected' : ''}>Chapter ${n}</option>`)
-            .join('');
-        chapterSelect.disabled = false;
-        verseInput.disabled = false;
-        verseJumpBtn.disabled = false;
-    }
-
-    // Event listeners
-    $('#bible-version-select').addEventListener('change', (e) => {
-        AppState.bibleVersion = e.target.value;
-        showToast(`Bible version set to ${e.target.value}`, 'success');
-        if (AppState.currentBook && AppState.currentChapter) {
-            loadBibleChapter(AppState.currentBook, AppState.currentChapter);
-        }
+    $('#prev-chapter-btn').addEventListener('click', () => {
+        if (AppState.currentChapter > 1) renderBibleReaderView(AppState.currentBook, AppState.currentChapter - 1);
     });
-    
-    bookSelect.addEventListener('change', (e) => {
-        const book = e.target.value;
-        if (book) {
-            populateChapters(book, 1);
-            loadBibleChapter(book, 1);
-        } else {
-            chapterSelect.innerHTML = '<option value="">Chapter</option>';
-            chapterSelect.disabled = true;
-            verseInput.disabled = true;
-            verseJumpBtn.disabled = true;
-        }
-    });
-
-    chapterSelect.addEventListener('change', (e) => {
-        const chapter = parseInt(e.target.value);
-        if (bookSelect.value && chapter) {
-            loadBibleChapter(bookSelect.value, chapter);
-        }
+    $('#next-chapter-btn').addEventListener('click', () => {
+        const totalChapters = getBookChapterCount(AppState.currentBook);
+        if (AppState.currentChapter < totalChapters) renderBibleReaderView(AppState.currentBook, AppState.currentChapter + 1);
     });
 
     function jumpToVerse() {
+        const verseInput = $('#bible-verse-jump');
         const verseNum = parseInt(verseInput.value);
         if (!verseNum) return;
         const verseEl = $(`.bible-verse[data-verse="${verseNum}"]`);
@@ -1280,54 +1401,12 @@ function renderBiblePage() {
             showToast(`Verse ${verseNum} not found in this chapter`, 'warning');
         }
     }
-
-    verseJumpBtn.addEventListener('click', jumpToVerse);
-    verseInput.addEventListener('keypress', (e) => {
+    $('#verse-jump-btn').addEventListener('click', jumpToVerse);
+    $('#bible-verse-jump').addEventListener('keypress', (e) => {
         if (e.key === 'Enter') jumpToVerse();
     });
-    
-    $('#search-bible-btn').addEventListener('click', () => {
-        showSearchModal();
-    });
-    
-    $('#bookmark-chapter-btn').addEventListener('click', () => {
-        if (AppState.currentBook && AppState.currentChapter) {
-            bookmarkChapter(AppState.currentBook, AppState.currentChapter);
-        } else {
-            showToast('No chapter selected', 'warning');
-        }
-    });
-    
-    $('#font-size-btn').addEventListener('click', () => {
-        showFontSizeOptions();
-    });
-    
-    $('#prev-chapter-btn').addEventListener('click', () => {
-        if (AppState.currentChapter > 1) {
-            populateChapters(AppState.currentBook, AppState.currentChapter - 1);
-            bookSelect.value = AppState.currentBook;
-            loadBibleChapter(AppState.currentBook, AppState.currentChapter - 1);
-        }
-    });
-    
-    $('#next-chapter-btn').addEventListener('click', () => {
-        const total = getBookChapterCount(AppState.currentBook);
-        if (AppState.currentChapter < total) {
-            populateChapters(AppState.currentBook, AppState.currentChapter + 1);
-            bookSelect.value = AppState.currentBook;
-            loadBibleChapter(AppState.currentBook, AppState.currentChapter + 1);
-        }
-    });
-    
-    // Load last read chapter if available
-    if (AppState.readingHistory.length > 0) {
-        const lastRead = AppState.readingHistory[AppState.readingHistory.length - 1];
-        if (lastRead && lastRead.book && lastRead.chapter) {
-            bookSelect.value = lastRead.book;
-            populateChapters(lastRead.book, lastRead.chapter);
-            loadBibleChapter(lastRead.book, lastRead.chapter);
-        }
-    }
+
+    return loadBibleChapter(book, chapter);
 }
 
 function getBibleBooks() {
@@ -1353,14 +1432,17 @@ async function loadBibleChapter(book, chapter) {
     AppState.currentBook = book;
     AppState.currentChapter = chapter;
     AppState.selectedVerses.clear();
-    
-    // Show loading
-    $('#bible-content').innerHTML = `
-        <div class="skeleton" style="height: 40px; margin-bottom: 16px;"></div>
-        <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
-        <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
-        <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
-    `;
+    clearVerseSelectionBar();
+
+    const contentEl = $('#bible-content');
+    if (contentEl) {
+        contentEl.innerHTML = `
+            <div class="skeleton" style="height: 40px; margin-bottom: 16px;"></div>
+            <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
+            <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
+            <div class="skeleton" style="height: 24px; margin-bottom: 12px;"></div>
+        `;
+    }
 
     let verses = [];
     let loadError = null;
@@ -1388,22 +1470,25 @@ async function loadBibleChapter(book, chapter) {
         `;
         return;
     }
-    
-    // Update chapter navigation
-    $('#chapter-navigation').style.display = 'flex';
-    $('#chapter-indicator').textContent = `${book} ${chapter}`;
-    
-    // Render verses
+
+    // Render verses, marking any that are already highlighted/bookmarked
+    // by the user so those states are visible as soon as the chapter opens.
     $('#bible-content').innerHTML = `
-        <h3 style="font-size: 20px; margin-bottom: 20px; font-weight: 700;">${book} ${chapter}</h3>
-        ${verses.map(verse => `
-            <div class="bible-verse" data-verse="${verse.verse}" onclick="toggleVerseSelection(${verse.verse})">
+        <h3 style="font-size: 20px; margin-bottom: 20px; font-weight: 700;">${escapeHtml(book)} ${chapter}</h3>
+        ${verses.map(verse => {
+            const classes = ['bible-verse'];
+            if (isVerseHighlighted(book, chapter, verse.verse)) classes.push('highlighted');
+            if (isVerseBookmarked(book, chapter, verse.verse)) classes.push('bookmarked');
+            return `
+            <div class="${classes.join(' ')}" data-verse="${verse.verse}" onclick="toggleVerseSelection(${verse.verse})">
                 <span class="verse-number">${verse.verse}</span>
                 <span class="bible-text">${escapeHtml(verse.text)}</span>
+                ${classes.includes('bookmarked') ? '<i class="fas fa-bookmark bible-verse-bookmark-icon"></i>' : ''}
             </div>
-        `).join('')}
+        `;
+        }).join('')}
     `;
-    
+
     // Save to reading history
     if (AppState.currentUser) {
         const uid = AppState.currentUser.uid;
@@ -1526,6 +1611,40 @@ function parseVerseSpansFromHTML(html) {
     return verses;
 }
 
+/* ---- Chapter cache (localStorage) ----
+   Scripture text never changes, so once a book/chapter/version has been
+   fetched from api.bible it's cached indefinitely. This is the main
+   lever for managing the api.bible token budget: re-opening a chapter,
+   or re-opening the app, never re-hits the API for something already
+   read before. Bump BIBLE_CACHE_VERSION if the cached shape ever changes. */
+const BIBLE_CACHE_VERSION = 'v1';
+const BIBLE_CACHE_PREFIX = `graceguide_bible_cache_${BIBLE_CACHE_VERSION}_`;
+
+function bibleCacheKey(bibleId, bookId, chapter) {
+    return `${BIBLE_CACHE_PREFIX}${bibleId}_${bookId}_${chapter}`;
+}
+
+function getCachedChapter(bibleId, bookId, chapter) {
+    try {
+        const raw = localStorage.getItem(bibleCacheKey(bibleId, bookId, chapter));
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed?.verses) ? parsed.verses : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+function setCachedChapter(bibleId, bookId, chapter, verses) {
+    try {
+        localStorage.setItem(bibleCacheKey(bibleId, bookId, chapter), JSON.stringify({ verses, ts: Date.now() }));
+    } catch (e) {
+        // Storage full/blocked (e.g. private browsing) — non-fatal, the
+        // chapter simply won't be cached this time.
+        console.warn('Could not cache Bible chapter locally:', e);
+    }
+}
+
 async function fetchBibleChapter(book, chapter, version) {
     const bookId = getUSFMBookId(book);
     if (!bookId) throw new Error(`Unknown Bible book: ${book}`);
@@ -1533,6 +1652,10 @@ async function fetchBibleChapter(book, chapter, version) {
     const idMap = await resolveBibleIds();
     const bibleId = idMap[version] || idMap[AppState.cachedBibleVersions[0]];
     if (!bibleId) throw new Error(`The ${version} translation isn't available with this API key.`);
+
+    // Cache-first: only ever call api.bible once per book/chapter/version.
+    const cached = getCachedChapter(bibleId, bookId, chapter);
+    if (cached) return cached;
 
     const url = `${BIBLE_API_BASE}/bibles/${bibleId}/chapters/${bookId}.${chapter}?content-type=html&include-verse-spans=true&include-notes=false&include-titles=false`;
     const response = await fetch(url, { headers: { 'api-key': BIBLE_API_KEY } });
@@ -1546,57 +1669,95 @@ async function fetchBibleChapter(book, chapter, version) {
     const html = json?.data?.content;
     if (!html) throw new Error('No content returned for this chapter.');
 
-    return parseVerseSpansFromHTML(html);
+    const verses = parseVerseSpansFromHTML(html);
+    setCachedChapter(bibleId, bookId, chapter, verses);
+    return verses;
 }
 
+function isVerseHighlighted(book, chapter, verse) {
+    return AppState.highlights.some(h => h.book === book && h.chapter === chapter && h.verse === verse);
+}
+
+function isVerseBookmarked(book, chapter, verse) {
+    return AppState.bookmarks.some(b => b.book === book && b.chapter === chapter && b.verse === verse);
+}
+
+/**
+ * Toggles one verse in/out of the current multi-selection. Deliberately
+ * does NOT open any modal/sheet here — a full-screen sheet or modal would
+ * sit on top of the verse list and block further taps, which is exactly
+ * why multi-verse selection didn't work before. Instead, a small
+ * non-blocking bar (see renderVerseSelectionBar) floats above the bottom
+ * nav so the user can keep tapping additional verses freely.
+ */
 function toggleVerseSelection(verseNumber) {
     const verseElement = $(`.bible-verse[data-verse="${verseNumber}"]`);
-    
+
     if (AppState.selectedVerses.has(verseNumber)) {
         AppState.selectedVerses.delete(verseNumber);
-        verseElement.classList.remove('selected');
+        if (verseElement) verseElement.classList.remove('selected');
     } else {
         AppState.selectedVerses.add(verseNumber);
-        verseElement.classList.add('selected');
+        if (verseElement) verseElement.classList.add('selected');
     }
-    
-    // Show action sheet if verses are selected
-    if (AppState.selectedVerses.size > 0) {
-        showVerseActions();
-    }
+
+    renderVerseSelectionBar();
 }
 
-function showVerseActions() {
-    const selectedCount = AppState.selectedVerses.size;
-    const verseNumbers = Array.from(AppState.selectedVerses).join(', ');
-    
-    const sheetContent = `
-        <h3 style="margin-bottom: 16px;">${selectedCount} verse${selectedCount > 1 ? 's' : ''} selected</h3>
-        <p style="color: var(--text-slate); margin-bottom: 16px;">${AppState.currentBook} ${AppState.currentChapter}:${verseNumbers}</p>
-        
-        <div style="display: grid; gap: 8px;">
-            <button class="btn btn-primary btn-block" onclick="highlightSelectedVerses()">
-                <i class="fas fa-highlighter"></i> Highlight
-            </button>
-            <button class="btn btn-secondary btn-block" onclick="bookmarkSelectedVerses()">
-                <i class="fas fa-bookmark"></i> Bookmark
-            </button>
-            <button class="btn btn-outline btn-block" onclick="addNoteToSelectedVerses()">
-                <i class="fas fa-sticky-note"></i> Add Note
-            </button>
-            <button class="btn btn-outline btn-block" onclick="shareSelectedVerses()">
-                <i class="fas fa-share"></i> Share
-            </button>
-            <button class="btn btn-gold btn-block" onclick="postSelectedVersesToSpace()">
-                <i class="fas fa-layer-group"></i> Post to Space
-            </button>
-            <button class="btn btn-accent btn-block" onclick="askAIAboutSelectedVerses()">
-                <i class="fas fa-dove"></i> Ask Shepherd
-            </button>
+/**
+ * Renders (or removes) the floating verse-selection action bar. It's
+ * appended to <body> — not the page container — so it stays fixed above
+ * the bottom nav and never intercepts taps on the verses above it.
+ */
+function renderVerseSelectionBar() {
+    let bar = document.getElementById('verse-select-bar');
+
+    if (AppState.selectedVerses.size === 0) {
+        if (bar) bar.remove();
+        return;
+    }
+
+    const count = AppState.selectedVerses.size;
+    const nums = Array.from(AppState.selectedVerses).sort((a, b) => a - b).join(', ');
+
+    if (!bar) {
+        bar = document.createElement('div');
+        bar.id = 'verse-select-bar';
+        bar.className = 'verse-select-bar';
+        document.body.appendChild(bar);
+    }
+
+    bar.innerHTML = `
+        <div class="verse-select-info">
+            <strong>${count}</strong> selected
+            <span class="verse-select-ref">${escapeHtml(AppState.currentBook || '')} ${AppState.currentChapter || ''}:${nums}</span>
+        </div>
+        <div class="verse-select-actions">
+            <button class="vsb-btn" onclick="highlightSelectedVerses()" aria-label="Highlight"><i class="fas fa-highlighter"></i></button>
+            <button class="vsb-btn" onclick="bookmarkSelectedVerses()" aria-label="Bookmark"><i class="fas fa-bookmark"></i></button>
+            <button class="vsb-btn" onclick="addNoteToSelectedVerses()" aria-label="Add note"><i class="fas fa-sticky-note"></i></button>
+            <button class="vsb-btn" onclick="shareSelectedVerses()" aria-label="Share"><i class="fas fa-share"></i></button>
+            <button class="vsb-btn" onclick="postSelectedVersesToSpace()" aria-label="Post to Space"><i class="fas fa-layer-group"></i></button>
+            <button class="vsb-btn" onclick="askAIAboutSelectedVerses()" aria-label="Ask Shepherd"><i class="fas fa-dove"></i></button>
+            <button class="vsb-btn vsb-close" onclick="clearVerseSelection()" aria-label="Clear selection"><i class="fas fa-times"></i></button>
         </div>
     `;
-    
-    showSheet(sheetContent);
+}
+
+/** Deselects all verses and removes the selection bar (without closing/saving anything). */
+function clearVerseSelection() {
+    AppState.selectedVerses.forEach(v => {
+        const el = $(`.bible-verse[data-verse="${v}"]`);
+        if (el) el.classList.remove('selected');
+    });
+    AppState.selectedVerses.clear();
+    clearVerseSelectionBar();
+}
+
+/** Just removes the bar element from the DOM (used on navigation/re-render). */
+function clearVerseSelectionBar() {
+    const bar = document.getElementById('verse-select-bar');
+    if (bar) bar.remove();
 }
 
 function postSelectedVersesToSpace() {
@@ -1613,7 +1774,7 @@ function postSelectedVersesToSpace() {
         };
     });
 
-    closeSheet();
+    clearVerseSelection();
     showCreateSpacePostModal({
         verses,
         sourceBook: AppState.currentBook,
@@ -1622,86 +1783,97 @@ function postSelectedVersesToSpace() {
 }
 
 function highlightSelectedVerses() {
-    if (!AppState.currentUser || AppState.selectedVerses.size === 0) return;
-    
+    if (AppState.selectedVerses.size === 0) return;
+    if (!requireAuth('Sign in to highlight verses.')) return;
+
     const uid = AppState.currentUser.uid;
+    const book = AppState.currentBook;
+    const chapter = AppState.currentChapter;
     const verses = Array.from(AppState.selectedVerses).map(v => ({
-        book: AppState.currentBook,
-        chapter: AppState.currentChapter,
-        verse: v,
-        timestamp: Date.now()
+        book, chapter, verse: v, timestamp: Date.now()
     }));
-    
+
     AppState.highlights.push(...verses);
     database.ref(`users/${uid}/highlights`).set(AppState.highlights)
         .then(() => {
             showToast('Verses highlighted!', 'success');
-            closeSheet();
-            AppState.selectedVerses.clear();
+            clearVerseSelection();
+            // Re-render so the highlight is visible immediately.
+            if (AppState.bibleView === 'reader') renderBibleReaderView(book, chapter);
         })
-        .catch(() => showToast('Failed to highlight', 'error'));
+        .catch(() => showToast('Failed to highlight. Please try again.', 'error'));
 }
 
 function bookmarkSelectedVerses() {
-    if (!AppState.currentUser || AppState.selectedVerses.size === 0) return;
-    
+    if (AppState.selectedVerses.size === 0) return;
+    if (!requireAuth('Sign in to bookmark verses.')) return;
+
     const uid = AppState.currentUser.uid;
+    const book = AppState.currentBook;
+    const chapter = AppState.currentChapter;
     const verses = Array.from(AppState.selectedVerses).map(v => ({
-        book: AppState.currentBook,
-        chapter: AppState.currentChapter,
-        verse: v,
-        reference: `${AppState.currentBook} ${AppState.currentChapter}:${v}`,
+        book, chapter, verse: v,
+        reference: `${book} ${chapter}:${v}`,
         timestamp: Date.now()
     }));
-    
+
     AppState.bookmarks.push(...verses);
     database.ref(`users/${uid}/bookmarks`).set(AppState.bookmarks)
         .then(() => {
             showToast('Verses bookmarked!', 'success');
-            closeSheet();
-            AppState.selectedVerses.clear();
+            clearVerseSelection();
+            if (AppState.bibleView === 'reader') renderBibleReaderView(book, chapter);
         })
-        .catch(() => showToast('Failed to bookmark', 'error'));
+        .catch(() => showToast('Failed to bookmark. Please try again.', 'error'));
 }
 
 function addNoteToSelectedVerses() {
-    const verseNumbers = Array.from(AppState.selectedVerses).join(', ');
-    
+    if (AppState.selectedVerses.size === 0) return;
+    if (!requireAuth('Sign in to add notes.')) return;
+
+    const book = AppState.currentBook;
+    const chapter = AppState.currentChapter;
+    const verseNumbers = Array.from(AppState.selectedVerses).sort((a, b) => a - b).join(', ');
+
     const modalContent = `
         <h3 style="margin-bottom: 16px;">Add Note</h3>
-        <p style="font-size: 14px; color: var(--text-slate); margin-bottom: 16px;">${AppState.currentBook} ${AppState.currentChapter}:${verseNumbers}</p>
+        <p style="font-size: 14px; color: var(--text-slate); margin-bottom: 16px;">${escapeHtml(book)} ${chapter}:${verseNumbers}</p>
         <textarea id="note-text" class="form-textarea" placeholder="Write your note..." rows="4"></textarea>
         <button id="save-note-btn" class="btn btn-primary btn-block mt-3">Save Note</button>
     `;
-    
+
     showModal(modalContent);
-    
+
     $('#save-note-btn').addEventListener('click', async () => {
         const noteText = $('#note-text').value.trim();
         if (!noteText) {
             showToast('Please write a note', 'warning');
             return;
         }
-        
+
         if (!AppState.currentUser) return;
-        
+
         const uid = AppState.currentUser.uid;
         const note = {
             text: noteText,
-            reference: `${AppState.currentBook} ${AppState.currentChapter}:${verseNumbers}`,
-            book: AppState.currentBook,
-            chapter: AppState.currentChapter,
+            reference: `${book} ${chapter}:${verseNumbers}`,
+            book, chapter,
             verses: Array.from(AppState.selectedVerses),
             timestamp: Date.now()
         };
-        
-        AppState.notes.push(note);
-        await database.ref(`users/${uid}/notes`).set(AppState.notes);
-        
-        showToast('Note saved!', 'success');
+
+        try {
+            AppState.notes.push(note);
+            await database.ref(`users/${uid}/notes`).set(AppState.notes);
+            showToast('Note saved!', 'success');
+        } catch (e) {
+            AppState.notes.pop();
+            showToast('Failed to save note. Please try again.', 'error');
+            return;
+        }
+
         closeModal();
-        closeSheet();
-        AppState.selectedVerses.clear();
+        clearVerseSelection();
     });
 }
 
@@ -1712,10 +1884,10 @@ function shareSelectedVerses() {
 }
 
 function askAIAboutSelectedVerses() {
-    const verseNumbers = Array.from(AppState.selectedVerses).join(', ');
+    const verseNumbers = Array.from(AppState.selectedVerses).sort((a, b) => a - b).join(', ');
     const reference = `${AppState.currentBook} ${AppState.currentChapter}:${verseNumbers}`;
-    
-    closeSheet();
+
+    clearVerseSelection();
     navigateTo('ask');
     
     setTimeout(() => {
@@ -1777,38 +1949,40 @@ function bookmarkChapter(book, chapter) {
         .catch(() => showToast('Failed to bookmark', 'error'));
 }
 
+/**
+ * Jumps straight to a chapter's reader view — used by deep links (search
+ * results, bookmarks, notifications, "Read Bible" shortcuts, etc). This
+ * intentionally skips the book/chapter grids since the caller already
+ * knows exactly which chapter is wanted.
+ */
 function openBibleChapter(book, chapter, verse) {
-    navigateTo('bible');
-    setTimeout(() => {
-        const bookSelect = $('#bible-book-select');
-        const chapterSelect = $('#bible-chapter-select');
-        const verseInput = $('#bible-verse-jump');
-        const verseJumpBtn = $('#verse-jump-btn');
-        if (bookSelect) {
-            bookSelect.value = book;
-            if (chapterSelect) {
-                const total = getBookChapterCount(book);
-                chapterSelect.innerHTML = Array.from({ length: total }, (_, i) => i + 1)
-                    .map(n => `<option value="${n}" ${n === chapter ? 'selected' : ''}>Chapter ${n}</option>`)
-                    .join('');
-                chapterSelect.disabled = false;
-            }
-            if (verseInput) verseInput.disabled = false;
-            if (verseJumpBtn) verseJumpBtn.disabled = false;
-            loadBibleChapter(book, chapter).then(() => {
-                if (verse) {
-                    setTimeout(() => {
-                        const verseEl = $(`.bible-verse[data-verse="${verse}"]`);
-                        if (verseEl) {
-                            verseEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                            verseEl.classList.add('verse-flash');
-                            setTimeout(() => verseEl.classList.remove('verse-flash'), 1500);
-                        }
-                    }, 200);
+    // Set the target view before navigating so that if we're not already
+    // on the Bible tab, navigateTo()'s own call to renderBiblePage() goes
+    // straight to the right chapter instead of rendering an intermediate
+    // view that would immediately get replaced.
+    AppState.bibleView = 'reader';
+    AppState.currentBook = book;
+    AppState.currentChapter = chapter;
+
+    let loadPromise;
+    if (AppState.currentRoute !== 'bible') {
+        navigateTo('bible'); // renderBiblePage() picks up the reader view we just set above
+        loadPromise = AppState.lastRenderPromise;
+    } else {
+        loadPromise = renderBibleReaderView(book, chapter);
+    }
+    if (verse && loadPromise && typeof loadPromise.then === 'function') {
+        loadPromise.then(() => {
+            setTimeout(() => {
+                const verseEl = $(`.bible-verse[data-verse="${verse}"]`);
+                if (verseEl) {
+                    verseEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    verseEl.classList.add('verse-flash');
+                    setTimeout(() => verseEl.classList.remove('verse-flash'), 1500);
                 }
-            });
-        }
-    }, 300);
+            }, 100);
+        });
+    }
 }
 
 /**

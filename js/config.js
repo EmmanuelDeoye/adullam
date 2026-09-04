@@ -47,8 +47,28 @@ const BIBLE_VERSIONS = {
   MSG: "6f11a7de016f942e-01",
   AMP: "a81b73293d3080c9-01"
 };
+
+// Firebase Cloud Messaging (push notifications) Configuration
+// ⚠️ REPLACE WITH YOUR OWN VAPID KEY — Firebase Console → Project settings
+// → Cloud Messaging → Web configuration → "Web Push certificates" → Generate
+// key pair. Without a real key, getToken() will fail and the "Enable
+// Notifications" button will show an error explaining this.
+const FCM_VAPID_KEY = "BBhcDhI3cU0DhE-KyF5jUEwjPLwyOoHMMrb2R--VJjkdsc0fW7hdnYzAnpD6GzJNlJO5EDrZpjFK-khTTlTqOeI";
+
 // Initialize Firebase
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const database = firebase.database();
 const storage = firebase.storage();
+
+// Firebase Cloud Messaging — only available in secure (https/localhost)
+// contexts that support service workers. Guarded so the app never breaks
+// on browsers/environments (or non-https previews) that lack support.
+let messaging = null;
+if ('serviceWorker' in navigator && typeof firebase.messaging === 'function' && firebase.messaging.isSupported && firebase.messaging.isSupported()) {
+  try {
+    messaging = firebase.messaging();
+  } catch (e) {
+    console.warn('Firebase Messaging could not be initialized:', e);
+  }
+}

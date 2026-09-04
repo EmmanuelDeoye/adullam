@@ -348,6 +348,22 @@ async function sendGroupMessage() {
         // Sending a message also makes you a member
         await database.ref(`communityGroups/${groupId}/members/${AppState.currentUser.uid}`).set(true);
         await database.ref(`communityGroups/${groupId}/messages/${generateId()}`).set(msg);
+
+        // Notify other members (push, via the addNotification -> fcmTokens
+        // Cloud Function trigger) that a forum/group message dropped.
+        const membersSnap = await database.ref(`communityGroups/${groupId}/members`).once('value');
+        const members = membersSnap.val() || {};
+        Object.keys(members).forEach((memberUid) => {
+            if (memberUid === AppState.currentUser.uid) return;
+            addNotification(memberUid, {
+                type: 'group_message',
+                fromUid: AppState.currentUser.uid,
+                fromName: msg.senderName,
+                groupId,
+                message: `${msg.senderName} in the group: ${content}`
+            });
+        });
+
         loadGroupMessages(groupId);
     } catch (error) {
         showToast('Failed to send message', 'error');
@@ -1012,6 +1028,17 @@ async function deliverDMMessage(messageFields) {
             await updateDMStreak(conversationId, uid, otherUid);
         }
 
+        // Fires a push notification (via the addNotification -> fcmTokens
+        // Cloud Function trigger) so the recipient is alerted even if the
+        // app is closed, matching "when a chat message drops".
+        addNotification(otherUid, {
+            type: 'dm_message',
+            fromUid: uid,
+            fromName: myName,
+            conversationId,
+            message: `${myName}: ${preview}`
+        });
+
         loadDMMessages();
         refreshDMStreakBadge();
     } catch (error) {
@@ -1559,8 +1586,18 @@ function renderSettingsPage() {
             
             <div class="card mb-3">
                 <h3 style="font-weight: 600; margin-bottom: 16px;">Notifications</h3>
-                
+
                 <div class="flex items-center justify-between p-2" style="border-bottom: 1px solid rgba(0,0,0,0.06);">
+                    <div>
+                        <div style="font-weight: 600;">Push Notifications</div>
+                        <div style="font-size: 12px; color: var(--text-slate);">Get notified about connections, amens, comments, chats, forum activity, and your reading streak — even when the app is closed.</div>
+                    </div>
+                </div>
+                <button id="enable-notifications-btn" class="btn btn-outline btn-block mt-2" onclick="enableNotifications()">
+                    <i class="fas fa-bell"></i> Enable Notifications
+                </button>
+
+                <div class="flex items-center justify-between p-2 mt-2" style="border-bottom: 1px solid rgba(0,0,0,0.06);">
                     <div>
                         <div style="font-weight: 600;">Daily Verse</div>
                         <div style="font-size: 12px; color: var(--text-slate);">Receive daily verse notification</div>
@@ -1600,6 +1637,8 @@ function renderSettingsPage() {
             </div>
         </div>
     `;
+
+    if (typeof refreshNotificationSettingsUI === 'function') refreshNotificationSettingsUI();
 }
 
 /* ============================================
@@ -2028,6 +2067,13 @@ window.setBibleFontSize = setBibleFontSize;
 window.shareVerse = shareVerse;
 window.saveVerse = saveVerse;
 window.openBibleChapter = openBibleChapter;
+window.openBibleBook = openBibleBook;
+window.openBibleChapterFromGrid = openBibleChapterFromGrid;
+window.renderBibleBookListView = renderBibleBookListView;
+window.renderBibleChapterListView = renderBibleChapterListView;
+window.renderBibleReaderView = renderBibleReaderView;
+window.loadBibleChapter = loadBibleChapter;
+window.clearVerseSelection = clearVerseSelection;
 window.showAuthModal = showAuthModal;
 window.requireAuth = requireAuth;
 window.handleProfileNavClick = handleProfileNavClick;
