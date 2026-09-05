@@ -202,17 +202,67 @@ function refreshNotificationSettingsUI() {
     btn.classList.toggle('btn-primary', enabled);
 }
 
-/** Foreground messages: the OS won't show a system banner for these
-    (the tab is focused), so we surface them as an in-app toast instead. */
+/**
+ * FCM only auto-shows a system notification for messages that arrive
+ * while the app is backgrounded/closed (handled by
+ * firebase-messaging-sw.js). While the tab is open and focused, "silent"
+ * foreground delivery used to mean the only sign anything happened was
+ * an in-app toast — invisible if the person wasn't looking at the tab,
+ * and gone as soon as they were. Now foreground pushes ALSO raise a
+ * real OS notification (so it lands in the system notification panel
+ * exactly like a backgrounded one would), in addition to the in-app
+ * toast and live badge refresh.
+ */
 function initForegroundMessageHandler() {
     if (!messaging) return;
     messaging.onMessage((payload) => {
         const title = payload?.notification?.title || 'GraceGuide';
         const body = payload?.notification?.body || '';
+        const data = payload?.data || {};
+
         showToast(`${title}${body ? ' — ' + body : ''}`, 'info');
+
+        if (Notification.permission === 'granted') {
+            // Prefer showing it via the SW registration when we have one —
+            // this makes it a "persistent" notification the OS keeps in the
+            // shade, consistent with how background pushes are shown.
+            if (fcmServiceWorkerRegistration && fcmServiceWorkerRegistration.showNotification) {
+                fcmServiceWorkerRegistration.showNotification(title, {
+                    body,
+                    icon: '/img/icons/icon-192.png',
+                    badge: '/img/icons/icon-96.png',
+                    data,
+                    tag: data.tag || undefined,
+                    vibrate: [100, 50, 100]
+                });
+            } else {
+                const notification = new Notification(title, {
+                    body,
+                    icon: '/img/icons/icon-192.png',
+                    data
+                });
+                notification.onclick = () => {
+                    window.focus();
+                    if (data.url) navigateTo(data.url.replace('/#/', ''));
+                    notification.close();
+                };
+            }
+        }
 
         if (typeof AppState !== 'undefined' && AppState.currentUser && typeof loadNotifications === 'function') {
             loadNotifications();
+        }
+    });
+}
+
+// Tapping a background notification (handled in firebase-messaging-sw.js)
+// posts a message back to whichever tab it focused/opened so we can
+// route straight to the relevant screen instead of just landing on Home.
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data?.type === 'notification-click' && event.data.url) {
+            const route = event.data.url.replace('/#/', '').replace(/^\//, '') || 'home';
+            navigateTo(route);
         }
     });
 }

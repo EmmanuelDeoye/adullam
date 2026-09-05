@@ -250,7 +250,7 @@ async function showGroupMembers(groupId) {
             <h3 style="margin-bottom: 16px;">Group Members (${profiles.length})</h3>
             <div style="max-height: 60vh; overflow-y: auto;">
                 ${profiles.map(p => `
-                    <div class="flex items-center gap-2 p-2" style="cursor:pointer; border-bottom: 1px solid rgba(0,0,0,0.06);" onclick="closeSheet(); viewUserProfile('${p.id}', '${escapeHtml(p.username || 'User').replace(/'/g, "\\'")}')">
+                    <div class="flex items-center gap-2 p-2" style="cursor:pointer; border-bottom: 1px solid rgba(0,0,0,0.06);" onclick="closeSheetThen(() => viewUserProfile('${p.id}', '${escapeHtml(p.username || 'User').replace(/'/g, "\\'")}'))">
                         <div class="post-avatar comment-avatar" style="width:40px;height:40px;">
                             ${p.avatar ? `<img src="${p.avatar}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">` : (p.username?.[0]?.toUpperCase() || 'U')}
                         </div>
@@ -376,10 +376,10 @@ function showGroupAttachMenu() {
     const sheetContent = `
         <h3 style="margin-bottom: 12px;">Share to Group</h3>
         <div style="display: grid; gap: 8px;">
-            <button class="btn btn-outline btn-block" onclick="closeSheet(); shareVerseToGroup();">
+            <button class="btn btn-outline btn-block" onclick="closeSheetThen(shareVerseToGroup)">
                 <i class="fas fa-book-bible"></i> Share Bible Verse
             </button>
-            <button class="btn btn-outline btn-block" onclick="closeSheet(); sharePlanToGroup();">
+            <button class="btn btn-outline btn-block" onclick="closeSheetThen(sharePlanToGroup)">
                 <i class="fas fa-calendar-check"></i> Share Study Plan
             </button>
         </div>
@@ -1054,16 +1054,16 @@ function showDMAttachMenu() {
         <h3 style="margin-bottom: 4px;">Share</h3>
         <p class="text-muted" style="font-size: 12px; margin-bottom: 12px;"><i class="fas fa-fire" style="color:#f57c00;"></i> Any of these keep your streak alive today.</p>
         <div style="display: grid; gap: 8px;">
-            <button class="btn btn-outline btn-block" onclick="closeSheet(); shareVerseToDM();">
+            <button class="btn btn-outline btn-block" onclick="closeSheetThen(shareVerseToDM)">
                 <i class="fas fa-book-bible"></i> Share Bible Verse
             </button>
-            <button class="btn btn-outline btn-block" onclick="closeSheet(); shareNoteToDM();">
+            <button class="btn btn-outline btn-block" onclick="closeSheetThen(shareNoteToDM)">
                 <i class="fas fa-sticky-note"></i> Share a Note
             </button>
-            <button class="btn btn-outline btn-block" onclick="closeSheet(); shareReflectionToDM();">
+            <button class="btn btn-outline btn-block" onclick="closeSheetThen(shareReflectionToDM)">
                 <i class="fas fa-lightbulb"></i> Share Today's Reflection
             </button>
-            <button class="btn btn-outline btn-block" onclick="closeSheet(); sharePlanToDM();">
+            <button class="btn btn-outline btn-block" onclick="closeSheetThen(sharePlanToDM)">
                 <i class="fas fa-calendar-check"></i> Share Study Plan
             </button>
         </div>
@@ -1245,7 +1245,8 @@ function renderProfilePage() {
     }
     
     const profile = AppState.userProfile || {};
-    
+    const brethrenCount = Array.from(AppState.userConnections.values()).filter(s => s === 'brethren').length;
+
     DOM.pageContainer.innerHTML = `
         <div class="profile-container">
             <div class="profile-header">
@@ -1260,17 +1261,17 @@ function renderProfilePage() {
                 <p style="color: var(--text-slate);">${escapeHtml(profile.bio || 'No bio yet')}</p>
                 
                 <div class="profile-stats">
-                    <div class="profile-stat">
-                        <div class="profile-stat-value">${AppState.bookmarks.length || 0}</div>
-                        <div class="profile-stat-label">Bookmarks</div>
+                    <div class="profile-stat" style="cursor: pointer;" onclick="showBrethrenListModal()">
+                        <div class="profile-stat-value">${brethrenCount}</div>
+                        <div class="profile-stat-label">Brethren</div>
+                    </div>
+                    <div class="profile-stat" style="cursor: pointer;" onclick="showMyPostsModal()">
+                        <div class="profile-stat-value" id="profile-posts-count">${AppState.spacePostCount ?? '—'}</div>
+                        <div class="profile-stat-label">Posts</div>
                     </div>
                     <div class="profile-stat">
-                        <div class="profile-stat-value">${AppState.notes.length || 0}</div>
-                        <div class="profile-stat-label">Notes</div>
-                    </div>
-                    <div class="profile-stat">
-                        <div class="profile-stat-value">${AppState.readingHistory.length || 0}</div>
-                        <div class="profile-stat-label">Chapters</div>
+                        <div class="profile-stat-value">${AppState.spaceStreak?.count || 0}</div>
+                        <div class="profile-stat-label">Streak</div>
                     </div>
                 </div>
             </div>
@@ -1283,7 +1284,26 @@ function renderProfilePage() {
                     <i class="fas fa-book-bible"></i> My Bible
                 </button>
             </div>
-            
+
+            <!-- Your Journey (moved from Home — sits just before Recent Activity) -->
+            <div class="card mb-3">
+                <h3 style="font-weight: 700; margin-bottom: 16px;">Your Journey</h3>
+                <div class="flex gap-2" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+                    <div class="text-center" style="background: rgba(48,72,58,0.08); padding: 16px; border-radius: 12px;">
+                        <div style="font-size: 28px; font-weight: 800; color: var(--primary-deep-olive);">${AppState.readingHistory.length || 0}</div>
+                        <div style="font-size: 11px; color: var(--text-slate);">Chapters Read</div>
+                    </div>
+                    <div class="text-center" style="background: rgba(48,72,58,0.08); padding: 16px; border-radius: 12px;">
+                        <div style="font-size: 28px; font-weight: 800; color: var(--primary-deep-olive);">${AppState.bookmarks.length || 0}</div>
+                        <div style="font-size: 11px; color: var(--text-slate);">Bookmarks</div>
+                    </div>
+                    <div class="text-center" style="background: rgba(48,72,58,0.08); padding: 16px; border-radius: 12px;">
+                        <div style="font-size: 28px; font-weight: 800; color: var(--primary-deep-olive);">${AppState.notes.length || 0}</div>
+                        <div style="font-size: 11px; color: var(--text-slate);">Notes</div>
+                    </div>
+                </div>
+            </div>
+
             <div class="card mb-3">
                 <h3 style="font-weight: 600; margin-bottom: 16px;">Recent Activity</h3>
                 ${AppState.readingHistory.length > 0 ? `
@@ -1313,6 +1333,120 @@ function renderProfilePage() {
             </div>
         </div>
     `;
+
+    // Post count isn't kept in AppState continuously (only Space page
+    // loads know it), so fetch it lazily and fill in the stat once ready
+    // rather than blocking the whole profile render on a query.
+    fetchMySpacePostCount();
+}
+
+/** Queries how many Space posts the signed-in user has authored and
+    updates both AppState (so it doesn't need refetching this session)
+    and the profile stat if it's currently on screen. */
+async function fetchMySpacePostCount() {
+    if (!AppState.currentUser) return;
+    try {
+        const snapshot = await database.ref('spacePosts').orderByChild('authorId').equalTo(AppState.currentUser.uid).once('value');
+        const posts = snapshot.val() || {};
+        AppState.spacePostCount = Object.keys(posts).length;
+        const el = document.getElementById('profile-posts-count');
+        if (el) el.textContent = AppState.spacePostCount;
+    } catch (error) {
+        console.error('Error fetching post count:', error);
+    }
+}
+
+/** Shows every Brethren (accepted connection) the user has, each
+    tappable straight through to their profile. */
+async function showBrethrenListModal() {
+    if (!requireAuth('Sign in to view your Brethren.')) return;
+
+    showModal(`
+        <h3 style="margin-bottom: 16px;">Brethren</h3>
+        <div id="brethren-list-body">
+            <div class="skeleton" style="height: 48px; margin-bottom: 8px;"></div>
+            <div class="skeleton" style="height: 48px; margin-bottom: 8px;"></div>
+        </div>
+    `);
+
+    try {
+        const uid = AppState.currentUser.uid;
+        const snapshot = await database.ref(`users/${uid}/connections`).once('value');
+        const connections = snapshot.val() || {};
+        const brethren = Object.entries(connections)
+            .filter(([, info]) => info && info.status === 'accepted')
+            .map(([otherUid, info]) => ({ otherUid, name: info.name || 'A GraceGuide member' }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+
+        const body = document.getElementById('brethren-list-body');
+        if (!body) return; // modal was closed before this resolved
+
+        body.innerHTML = brethren.length > 0 ? `
+            <div style="display:flex; flex-direction:column; gap:4px; max-height: 400px; overflow-y:auto;">
+                ${brethren.map(b => `
+                    <div class="flex items-center gap-2 p-2" style="cursor:pointer; border-bottom: 1px solid rgba(0,0,0,0.06);" onclick="closeModalThen(() => viewUserProfile('${b.otherUid}', '${escapeHtml(b.name).replace(/'/g, "\\'")}'))">
+                        <div class="post-avatar comment-avatar" style="width:40px;height:40px;">${escapeHtml(b.name)[0]?.toUpperCase() || 'U'}</div>
+                        <div style="flex:1; min-width:0; font-weight:600;">${escapeHtml(b.name)}</div>
+                        <i class="fas fa-chevron-right" style="color: var(--text-slate);"></i>
+                    </div>
+                `).join('')}
+            </div>
+        ` : `<p class="text-center text-muted">No Brethren yet — connect with someone from their profile to start.</p>`;
+    } catch (error) {
+        console.error('Error loading Brethren list:', error);
+        const body = document.getElementById('brethren-list-body');
+        if (body) body.innerHTML = `<p class="text-center text-muted">Couldn't load your Brethren list.</p>`;
+    }
+}
+
+/** Shows every Space post the user has authored/shared, each tappable
+    straight through to that post in the Space feed. */
+async function showMyPostsModal() {
+    if (!requireAuth('Sign in to view your posts.')) return;
+
+    showModal(`
+        <h3 style="margin-bottom: 16px;">My Posts</h3>
+        <div id="my-posts-list-body">
+            <div class="skeleton" style="height: 60px; margin-bottom: 8px;"></div>
+            <div class="skeleton" style="height: 60px; margin-bottom: 8px;"></div>
+        </div>
+    `);
+
+    try {
+        const uid = AppState.currentUser.uid;
+        const snapshot = await database.ref('spacePosts').orderByChild('authorId').equalTo(uid).once('value');
+        const posts = Object.values(snapshot.val() || {}).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+        AppState.spacePostCount = posts.length;
+        const countEl = document.getElementById('profile-posts-count');
+        if (countEl) countEl.textContent = posts.length;
+
+        const body = document.getElementById('my-posts-list-body');
+        if (!body) return;
+
+        const preview = (post) => {
+            if (post.type === 'text' || !post.type) return truncate(escapeHtml(post.content || ''), 90);
+            if (post.type === 'note') return truncate(escapeHtml(post.text || post.content || ''), 90);
+            if (post.type === 'plan') return `📅 ${escapeHtml(post.title || 'Study Plan')}`;
+            if (post.type === 'video') return `🎬 ${escapeHtml(post.caption || 'Video')}`;
+            return truncate(escapeHtml(post.content || post.text || ''), 90);
+        };
+
+        body.innerHTML = posts.length > 0 ? `
+            <div style="display:flex; flex-direction:column; gap:4px; max-height: 420px; overflow-y:auto;">
+                ${posts.map(post => `
+                    <div class="p-2" style="cursor:pointer; border-bottom: 1px solid rgba(0,0,0,0.06);" onclick="closeModalThen(() => openSpacePostFromNotification('${post.id}', false))">
+                        <div style="font-size: 11px; color: var(--text-slate); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 2px;">${escapeHtml(post.type || 'post')} • ${formatDate(post.timestamp)}</div>
+                        <div>${preview(post)}</div>
+                        <div style="font-size: 12px; color: var(--text-slate); margin-top: 4px;"><i class="fas fa-hands-praying"></i> ${Object.keys(post.amens || {}).length} &nbsp; <i class="fas fa-comment"></i> ${Object.keys(post.comments || {}).length}</div>
+                    </div>
+                `).join('')}
+            </div>
+        ` : `<p class="text-center text-muted">You haven't posted to Space yet.</p>`;
+    } catch (error) {
+        console.error('Error loading my posts:', error);
+        const body = document.getElementById('my-posts-list-body');
+        if (body) body.innerHTML = `<p class="text-center text-muted">Couldn't load your posts.</p>`;
+    }
 }
 
 function editProfile() {
@@ -1843,6 +1977,11 @@ function initEventListeners() {
     // Logout
     DOM.drawerLogout.addEventListener('click', handleDrawerAuthButtonClick);
     
+    // Back (iOS/desktop installed PWAs have no browser chrome back button)
+    if (DOM.backBtn) {
+        DOM.backBtn.addEventListener('click', goBack);
+    }
+
     // Notifications
     DOM.notifBtn.addEventListener('click', () => {
         showNotificationPanel();
@@ -1899,6 +2038,7 @@ function initEventListeners() {
 
         if (!authReady) return;
 
+        AppState.appNavDepth = Math.max(0, AppState.appNavDepth - 1);
         const route = state.route || (window.location.hash.replace('#/', '') || 'home');
         navigateTo(route, { fromPopstate: true });
     });
@@ -1923,7 +2063,7 @@ function initEventListeners() {
 function notifClickAction(notif) {
     if (notif.postId && (notif.type === 'space_amen' || notif.type === 'space_comment')) {
         const openComments = notif.type === 'space_comment';
-        return `closeSheet(); openSpacePostFromNotification('${notif.postId}', ${openComments})`;
+        return `closeSheetThen(() => openSpacePostFromNotification('${notif.postId}', ${openComments}))`;
     }
     if (notif.fromUid) {
         const safeName = escapeHtml(notif.fromName || 'User').replace(/'/g, "\\'");
@@ -1956,6 +2096,25 @@ async function openSpacePostFromNotification(postId, openComments) {
 async function showNotificationPanel() {
     if (!requireAuth('Sign in to view notifications.')) return;
 
+    try {
+        await renderNotificationPanelContent();
+    } catch (error) {
+        // Belt-and-braces: a single malformed notification/connection
+        // record used to be able to throw mid-render and leave the tap
+        // looking like it did nothing at all. Now it always at least
+        // shows *something*, with a retry option.
+        console.error('Error showing notifications:', error);
+        showSheet(`
+            <h3 style="margin-bottom: 12px;">Notifications</h3>
+            <p class="text-center text-muted" style="margin-bottom: 16px;">Something went wrong loading your notifications.</p>
+            <button class="btn btn-outline btn-block" onclick="closeSheetThen(showNotificationPanel)">
+                <i class="fas fa-rotate-right"></i> Try Again
+            </button>
+        `);
+    }
+}
+
+async function renderNotificationPanelContent() {
     // Pull pending incoming connection requests straight from the
     // connections node (source of truth) rather than relying on the
     // notification log, so Accept/Decline is always accurate even if a
@@ -2074,6 +2233,10 @@ window.renderBibleChapterListView = renderBibleChapterListView;
 window.renderBibleReaderView = renderBibleReaderView;
 window.loadBibleChapter = loadBibleChapter;
 window.clearVerseSelection = clearVerseSelection;
+window.closeSheetThen = closeSheetThen;
+window.closeModalThen = closeModalThen;
+window.showBrethrenListModal = showBrethrenListModal;
+window.showMyPostsModal = showMyPostsModal;
 window.showAuthModal = showAuthModal;
 window.requireAuth = requireAuth;
 window.handleProfileNavClick = handleProfileNavClick;

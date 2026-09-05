@@ -53,7 +53,7 @@ const BIBLE_VERSIONS = {
 // → Cloud Messaging → Web configuration → "Web Push certificates" → Generate
 // key pair. Without a real key, getToken() will fail and the "Enable
 // Notifications" button will show an error explaining this.
-const FCM_VAPID_KEY = "BBhcDhI3cU0DhE-KyF5jUEwjPLwyOoHMMrb2R--VJjkdsc0fW7hdnYzAnpD6GzJNlJO5EDrZpjFK-khTTlTqOeI";
+const FCM_VAPID_KEY = "REPLACE_WITH_YOUR_VAPID_KEY";
 
 // Initialize Firebase
 firebase.initializeApp(firebaseConfig);

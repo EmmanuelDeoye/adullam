@@ -1167,7 +1167,7 @@ function showConversationHistory() {
     const sheetContent = `
         <div class="flex items-center justify-between mb-3">
             <h3>Conversations</h3>
-            <button class="btn btn-primary btn-sm" onclick="closeSheet(); startNewConversation();">
+            <button class="btn btn-primary btn-sm" onclick="closeSheetThen(startNewConversation)">
                 <i class="fas fa-plus"></i> New
             </button>
         </div>
@@ -1819,15 +1819,48 @@ function renderSpaceStreakBanner() {
 
 /* ---- Page render ---- */
 async function renderSpacePage() {
+    // Fresh visit starts unfiltered — filters/search are a within-session
+    // convenience, not something that should surprise the user by
+    // silently persisting from a previous visit.
+    AppState.spaceFilterType = 'all';
+    AppState.spaceSearchQuery = '';
+
     DOM.pageContainer.innerHTML = `
         <div class="space-container" style="max-width: 640px; margin: 0 auto; padding: 12px;">
             <div id="space-streak-slot">${renderSpaceStreakBanner()}</div>
+
+            <div class="space-search-bar">
+                <i class="fas fa-magnifying-glass"></i>
+                <input type="text" id="space-search-input" placeholder="Search Space...">
+            </div>
+            <div class="space-filter-pills" id="space-filter-pills">
+                <button class="space-filter-pill active" data-type="all">All</button>
+                <button class="space-filter-pill" data-type="text">Reflections</button>
+                <button class="space-filter-pill" data-type="note">Notes</button>
+                <button class="space-filter-pill" data-type="plan">Study Plans</button>
+                <button class="space-filter-pill" data-type="video">Videos</button>
+            </div>
+
             <div id="space-feed" class="space-feed">
                 <div class="skeleton" style="height: 220px; border-radius: 16px; margin-bottom: 14px;"></div>
                 <div class="skeleton" style="height: 220px; border-radius: 16px;"></div>
             </div>
         </div>
     `;
+
+    $('#space-search-input').addEventListener('input', (e) => {
+        AppState.spaceSearchQuery = e.target.value;
+        applySpaceFilters();
+    });
+
+    $$('#space-filter-pills .space-filter-pill').forEach((pill) => {
+        pill.addEventListener('click', () => {
+            $$('#space-filter-pills .space-filter-pill').forEach(p => p.classList.remove('active'));
+            pill.classList.add('active');
+            AppState.spaceFilterType = pill.dataset.type;
+            applySpaceFilters();
+        });
+    });
 
     await loadSpaceStreak();
     // Guard against the user having navigated to a different page while
@@ -1838,6 +1871,49 @@ async function renderSpacePage() {
     if (streakSlot) streakSlot.innerHTML = renderSpaceStreakBanner();
 
     await loadSpacePosts();
+}
+
+/** Text used to match a post against the Space search bar. */
+function getSpacePostSearchableText(post) {
+    return [
+        post.content, post.text, post.caption, post.title, post.reference,
+        post.sourceBook, (post.slides || []).map(s => s.text || s.content).join(' '),
+        (post.tags || []).join(' ')
+    ].filter(Boolean).join(' ').toLowerCase();
+}
+
+/** Re-renders #space-feed from the already-fetched AppState.spacePosts,
+    applying the current type filter + search query — no network round
+    trip, so filtering/searching feels instant. */
+function applySpaceFilters() {
+    const container = $('#space-feed');
+    if (!container) return;
+
+    const type = AppState.spaceFilterType || 'all';
+    const query = (AppState.spaceSearchQuery || '').trim().toLowerCase();
+
+    let list = AppState.spacePosts || [];
+    if (type !== 'all') list = list.filter(p => (p.type || 'text') === type);
+    if (query) list = list.filter(p => getSpacePostSearchableText(p).includes(query));
+
+    if (list.length === 0) {
+        container.innerHTML = `
+            <div class="text-center" style="padding: 60px 20px;">
+                <i class="fas fa-magnifying-glass" style="font-size: 36px; opacity: 0.3; margin-bottom: 12px;"></i>
+                <p class="text-muted">No posts match${query ? ` "${escapeHtml(AppState.spaceSearchQuery.trim())}"` : ''}${type !== 'all' ? ' in this category' : ''}.</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = list.map(post => {
+        try {
+            return renderSpaceCard(post);
+        } catch (cardError) {
+            console.error('Skipping a Space post that failed to render:', post?.id, cardError);
+            return '';
+        }
+    }).join('');
 }
 
 async function loadSpacePosts() {
@@ -1905,19 +1981,7 @@ async function loadSpacePosts() {
         });
 
         AppState.spacePosts = ranked;
-
-        // Render each card in isolation — one malformed/legacy post record
-        // shouldn't be able to blank out the entire feed for everyone.
-        const cardsHTML = ranked.map(post => {
-            try {
-                return renderSpaceCard(post);
-            } catch (cardError) {
-                console.error('Skipping a Space post that failed to render:', post?.id, cardError);
-                return '';
-            }
-        }).join('');
-
-        container.innerHTML = cardsHTML || `<p class="text-center text-muted" style="padding: 40px 20px;">Space is quiet right now.</p>`;
+        applySpaceFilters();
         initSpaceCarouselObservers();
     } catch (error) {
         console.error('Error rendering Space posts:', error);

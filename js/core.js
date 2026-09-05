@@ -22,6 +22,12 @@ const AppState = {
     // 'chapters' (grid of chapter numbers for the chosen book), or
     // 'reader' (the actual chapter text). null = not yet decided.
     bibleView: null,
+    // How many in-app navigations are "behind" the current screen in
+    // browser history — lets the top-bar Back button (needed on iOS/
+    // desktop installed PWAs, which have no browser chrome of their own)
+    // know whether history.back() will land somewhere inside the app or
+    // just do nothing/exit.
+    appNavDepth: 0,
     selectedVerses: new Set(),
     plannerData: [],
     notifications: [],
@@ -83,6 +89,7 @@ const DOM = {
     drawerClose: document.getElementById('drawer-close'),
     drawerLogout: document.getElementById('drawer-logout'),
     notifBtn: document.getElementById('notif-btn'),
+    backBtn: document.getElementById('back-btn'),
     spaceAddBtn: document.getElementById('space-add-btn'),
     profileNavBtn: document.getElementById('profile-nav-btn'),
     profileNavAvatar: document.getElementById('profile-nav-avatar')
@@ -201,6 +208,19 @@ function closeModal(fromPopstate = false) {
     }
 }
 
+/**
+ * Same reasoning as closeSheetThen(): closeModal()'s history.back() is
+ * async, so anything that itself navigates or opens another
+ * modal/sheet right afterward (e.g. openBibleChapter -> navigateTo,
+ * which does its own history.pushState) can race it. Use this instead
+ * of `onclick="closeModal(); next()"` whenever `next` navigates or
+ * opens another overlay.
+ */
+function closeModalThen(next) {
+    closeModal();
+    setTimeout(next, 0);
+}
+
 function showSheet(content, options = {}) {
     // Close any open modal first to avoid stacked overlays
     if (AppState.modalOpen) closeModal();
@@ -242,6 +262,21 @@ function closeSheet(fromPopstate = false) {
         AppState.suppressNextPopstateNav = true;
         history.back();
     }
+}
+
+/**
+ * Closes the current sheet, then opens whatever comes next (a modal, a
+ * different sheet, navigation, etc). This exists because
+ * `onclick="closeSheet(); doSomething()"` is racy: closeSheet()'s
+ * history.back() resolves asynchronously, so a history.pushState() from
+ * the very next line (e.g. showModal()) can fire before it — corrupting
+ * the back/forward stack, which is why buttons using that old pattern
+ * would sometimes silently do nothing. Deferring `next` by one tick lets
+ * the back-navigation actually finish first.
+ */
+function closeSheetThen(next) {
+    closeSheet();
+    setTimeout(next, 0);
 }
 
 function setLoading(isLoading) {
@@ -397,13 +432,14 @@ async function loadUserData() {
     
     try {
         // Load bookmarks, highlights, notes, reading history
-        const [bookmarksSnap, highlightsSnap, notesSnap, historySnap, plannerSnap, connectionsSnap] = await Promise.all([
+        const [bookmarksSnap, highlightsSnap, notesSnap, historySnap, plannerSnap, connectionsSnap, spaceStreakSnap] = await Promise.all([
             database.ref(`users/${uid}/bookmarks`).once('value'),
             database.ref(`users/${uid}/highlights`).once('value'),
             database.ref(`users/${uid}/notes`).once('value'),
             database.ref(`users/${uid}/readingHistory`).once('value'),
             database.ref(`users/${uid}/planner`).once('value'),
-            database.ref(`users/${uid}/connections`).once('value')
+            database.ref(`users/${uid}/connections`).once('value'),
+            database.ref(`users/${uid}/spaceStreak`).once('value')
         ]);
         
         AppState.bookmarks = bookmarksSnap.val() || [];
@@ -412,6 +448,7 @@ async function loadUserData() {
         AppState.readingHistory = historySnap.val() || [];
         AppState.plannerData = plannerSnap.val() || [];
         AppState.currentPlan = AppState.plannerData[0] || null;
+        AppState.spaceStreak = spaceStreakSnap.val() || { count: 0, lastPostDate: null };
 
         AppState.userConnections = new Map();
         const connections = connectionsSnap.val() || {};
@@ -818,6 +855,15 @@ function navigateTo(route, options = {}) {
         clearVerseSelectionBar();
     }
 
+    // Leaving Home or the Quiz page: stop their live-updating countdown
+    // ticker so it doesn't keep firing (and touching now-gone DOM nodes)
+    // in the background. The quiz attempt timer is intentionally left
+    // running even if the user navigates away mid-attempt, since an
+    // in-progress attempt should still auto-submit on time.
+    if (route !== 'home' && route !== 'quiz' && typeof stopQuizCountdownInterval === 'function') {
+        stopQuizCountdownInterval();
+    }
+
     // Close any open overlays first (they manage their own history entries)
     if (AppState.modalOpen) closeModal(true);
     if (AppState.sheetOpen) closeSheet(true);
@@ -841,6 +887,7 @@ function navigateTo(route, options = {}) {
             history.replaceState({ route }, '', url);
         } else if (window.location.hash !== url) {
             history.pushState({ route }, '', url);
+            AppState.appNavDepth++;
         }
     }
 
@@ -884,6 +931,9 @@ function navigateTo(route, options = {}) {
             break;
         case 'view-profile':
             renderResult = renderViewProfilePage();
+            break;
+        case 'quiz':
+            renderResult = renderQuizPage();
             break;
         default:
             renderResult = renderHomePage();
@@ -941,9 +991,38 @@ function updateNavigation(route) {
         profile: 'My Profile',
         settings: 'Settings',
         'talk-to-someone': 'Talk to Someone',
-        'view-profile': AppState.viewedProfileName || 'Profile'
+        'view-profile': AppState.viewedProfileName || 'Profile',
+        quiz: 'Weekly Quiz'
     };
     DOM.topBarTitle.textContent = titles[route] || 'GraceGuide';
+
+    // The Back button only makes sense away from the 3 primary tabs —
+    // those are always one tap away via the bottom nav, so a Back
+    // button there would be redundant. It's most needed on sub-screens
+    // (Bible, Profile, Chats, Settings, viewing someone else's profile,
+    // etc.) since installed PWAs on iOS/desktop have no browser chrome
+    // of their own to go back with.
+    if (DOM.backBtn) {
+        const isMainTab = MAIN_TAB_ROUTES.includes(route);
+        DOM.backBtn.classList.toggle('hidden', isMainTab);
+    }
+}
+
+const MAIN_TAB_ROUTES = ['home', 'ask', 'space'];
+
+/**
+ * Navigates one step back in the app's own history when there's
+ * somewhere to go back to, otherwise falls back to Home. Used by the
+ * top-bar Back button — plain history.back() alone isn't reliable here
+ * since an installed/standalone PWA can have an empty or unusual
+ * history stack (e.g. opened directly to a deep link).
+ */
+function goBack() {
+    if (AppState.appNavDepth > 0) {
+        history.back();
+    } else {
+        navigateTo('home');
+    }
 }
 
 function openDrawer() {
@@ -978,29 +1057,14 @@ async function renderHomePage() {
     DOM.bottomNav.style.display = 'flex';
     DOM.drawer.style.display = 'flex';
     
-    const dailyVerse = await getDailyVerse();
     const reflection = await getDailyReflection();
     AppState.todayReflection = reflection;
-    
+    const quizCardHTML = await renderHomeQuizCard();
+
     DOM.pageContainer.innerHTML = `
         <div class="home-container" style="max-width: 768px; margin: 0 auto; padding: 16px;">
-            <!-- Daily Verse Card -->
-            <div class="card mb-4" style="background: linear-gradient(135deg, var(--primary-deep-olive), var(--primary-dark)); color: white; border: none;">
-                <div class="flex items-center justify-between mb-2">
-                    <span style="font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; opacity: 0.8;">Today's Verse</span>
-                    <span style="font-size: 12px; opacity: 0.8;">${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}</span>
-                </div>
-                <p style="font-size: 20px; font-weight: 600; margin-bottom: 8px; font-family: 'Playfair Display', serif; line-height: 1.5;">"${dailyVerse.text}"</p>
-                <p style="font-size: 14px; opacity: 0.9;">${dailyVerse.reference}</p>
-                <div class="flex gap-2 mt-3">
-                    <button class="btn btn-sm" style="background: rgba(255,255,255,0.2); color: white;" onclick="shareVerse('${escapeHtml(dailyVerse.reference)}: ${escapeHtml(dailyVerse.text)}')">
-                        <i class="fas fa-share"></i> Share
-                    </button>
-                    <button class="btn btn-sm" style="background: rgba(255,255,255,0.2); color: white;" onclick="saveVerse('${escapeHtml(dailyVerse.reference)}', '${escapeHtml(dailyVerse.text)}')">
-                        <i class="fas fa-bookmark"></i> Save
-                    </button>
-                </div>
-            </div>
+            <!-- Weekly Bible Quiz: countdown / live / leaderboard -->
+            ${quizCardHTML}
             
             <!-- Quick Actions -->
             <div class="flex gap-2 mb-4" style="overflow-x: auto; padding-bottom: 8px;">
@@ -1038,25 +1102,6 @@ async function renderHomePage() {
                 </button>
             </div>
             
-            <!-- Reading Progress -->
-            <div class="card mb-4">
-                <h3 style="font-weight: 700; margin-bottom: 16px;">Your Journey</h3>
-                <div class="flex gap-2" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
-                    <div class="text-center" style="background: rgba(48,72,58,0.08); padding: 16px; border-radius: 12px;">
-                        <div style="font-size: 28px; font-weight: 800; color: var(--primary-deep-olive);">${AppState.readingHistory.length || 0}</div>
-                        <div style="font-size: 11px; color: var(--text-slate);">Chapters Read</div>
-                    </div>
-                    <div class="text-center" style="background: rgba(48,72,58,0.08); padding: 16px; border-radius: 12px;">
-                        <div style="font-size: 28px; font-weight: 800; color: var(--primary-deep-olive);">${AppState.bookmarks.length || 0}</div>
-                        <div style="font-size: 11px; color: var(--text-slate);">Bookmarks</div>
-                    </div>
-                    <div class="text-center" style="background: rgba(48,72,58,0.08); padding: 16px; border-radius: 12px;">
-                        <div style="font-size: 28px; font-weight: 800; color: var(--primary-deep-olive);">${AppState.notes.length || 0}</div>
-                        <div style="font-size: 11px; color: var(--text-slate);">Notes</div>
-                    </div>
-                </div>
-            </div>
-            
             <!-- Recommended Reading -->
             <div class="card">
                 <h3 style="font-weight: 700; margin-bottom: 16px;">Recommended for You</h3>
@@ -1074,6 +1119,8 @@ async function renderHomePage() {
             </div>
         </div>
     `;
+
+    startQuizCountdownTicker(() => renderHomePage());
 }
 
 async function getDailyVerse() {
@@ -2031,7 +2078,7 @@ function showSearchModal() {
         
         if (results.length > 0) {
             $('#bible-search-results').innerHTML = results.map(result => `
-                <div class="p-2" style="cursor: pointer; border-bottom: 1px solid rgba(0,0,0,0.06);" onclick="closeModal(); openBibleChapter('${result.title}', 1)">
+                <div class="p-2" style="cursor: pointer; border-bottom: 1px solid rgba(0,0,0,0.06);" onclick="closeModalThen(() => openBibleChapter('${result.title}', 1))">
                     <div style="font-weight: 600;">${result.title}</div>
                     <div style="font-size: 12px; color: var(--text-slate);">${result.subtitle}</div>
                 </div>
