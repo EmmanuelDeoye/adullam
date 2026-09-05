@@ -48,5 +48,44 @@ firebase deploy --only functions
 ```
 Until this is deployed, tokens will save correctly but no pushes will actually be delivered — that final delivery step lives entirely in this function, by design (it's the only safe place to hold your credentials).
 
-## One more thing worth knowing
+## 8. Notification reliability (items #1, #2, #5 from your last message)
+Found a real, systemic bug: several buttons did `closeSheet(); openSomething();` in a single click. `closeSheet()`'s `history.back()` resolves asynchronously, so the very next line's `history.pushState()` (from opening a modal, or navigating) could fire before it — corrupting the browser history stack. This explained:
+- Verse-sharing to chat/forum silently doing nothing
+- The notification bell sometimes not responding
+All 10 occurrences of this pattern are fixed (via new `closeSheetThen()`/`closeModalThen()` helpers). `showNotificationPanel` is also now wrapped in a try/catch so one bad record can't make it fail silently.
+Foreground push messages now also raise a real OS notification (not just an in-app toast), so pushes show in the system notification panel even while the app is open — not only when backgrounded. This is on top of the Cloud Function requirement from before (see section 4 above) — foreground behavior doesn't need the function, but backgrounded/closed delivery still does.
+
+## 9. Back button (item #7)
+Added a back arrow in the top navbar (before the notification bell), shown on every screen except Home/Shepherd/Space (the 3 bottom-nav tabs). Needed because an installed PWA on iOS/desktop has no browser chrome of its own to go back with.
+
+## 10. Profile restructure (item #3)
+- "Your Journey" (chapters/bookmarks/notes) moved from Home to Profile, right before "Recent Activity".
+- The stat row under the bio is now Brethren / Posts / Streak. Tapping Brethren lists your accepted connections; tapping Posts lists everything you've posted to Space. Both link straight through to the relevant profile/post.
+
+## 11. Space filter + search (item #6)
+Added a search bar and type filter pills (All/Reflections/Notes/Study Plans/Videos) above the Space feed — both apply instantly against posts already loaded, no extra network round trip.
+
+## 12. Weekly Bible Quiz (item #4) — ACTION NEEDED (admin page is next)
+The "Today's Verse" home card is now a live countdown to a Weekly Bible Quiz competition, with a full quiz page (prep → attempt → result) and a Home/quiz-page leaderboard (top 5 + "Show More" modal with full ranking).
+
+**This reads from `quizCompetition/current` in the Realtime Database — there's no data there yet**, so right now it will just show "No competition is scheduled yet." Once the admin page exists, it needs to write this shape:
+```js
+quizCompetition/current: {
+  startTime: 1735689600000,      // ms epoch — when the quiz opens (the "D-Day")
+  timerMinutes: 25,              // optional, defaults to 25
+  concentration: [                // optional prep list shown pre-window
+    { character: "Moses", book: "Exodus", reference: "Exodus 1-14" }
+  ],
+  questions: [                    // required before the window opens
+    { question: "Who led Israel out of Egypt?", options: ["Moses","Aaron","Joshua","Caleb"], correctIndex: 0 }
+  ]
+  // participants/{uid} is written by the app itself on submission — leave this out
+}
+```
+State is computed purely from `now` vs `startTime` (no separate status flag to keep in sync): countdown → active (24h window) → ended (shows leaderboard, until the admin sets a new future `startTime`).
+
+**Known limitation to flag for whoever builds the admin page/rules**: without backend gating, `questions[].correctIndex` is technically visible to any signed-in client that inspects network traffic. Locking this down properly means adding a Firebase Security Rule that only allows reading `quizCompetition/current/questions` once the active window has opened (keyed off `startTime`). Worth doing before this is used for anything with real stakes attached.
+
+Also: when scheduling a new round, the admin page should also clear out the previous round's `participants` (or move them into a separate history path) — otherwise old scores will keep showing on the new round's leaderboard.
+
 Your Bible API key and DeepSeek API key are visible in `js/config.js`, which ships to every visitor's browser — this was already true before these changes and is a pre-existing characteristic of a client-only site, not something introduced here. If you want those hidden, it would take a small backend/proxy (or Cloud Functions) in front of those calls. Happy to help with that separately if you'd like.
